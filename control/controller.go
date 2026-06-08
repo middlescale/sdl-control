@@ -82,9 +82,10 @@ type cachedGatewayGrant struct {
 }
 
 type gatewayGrantBuildOptions struct {
-	lastSessionID uint64
-	forceReissue  bool
-	refresh       bool
+	lastSessionID      uint64
+	lastSessionIDValid bool
+	forceReissue       bool
+	refresh            bool
 }
 
 type deviceAuthChallengeState struct {
@@ -2311,6 +2312,9 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 	if len(nodes) == 0 {
 		return nil, policyRev, false
 	}
+	if opts.refresh && opts.lastSessionID != 0 {
+		opts.lastSessionIDValid = c.gatewayGrantSessionKnownLocked(virtualIP, deviceID, opts.lastSessionID)
+	}
 	hardExpire := now.Add(gatewayGrantHardTTL)
 	softRefreshAfter := hardExpire.Add(-gatewayGrantSoftRefreshLead)
 	leaseSecs := uint32(gatewayGrantLease / time.Second)
@@ -2356,22 +2360,15 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 	nodeFingerprint := gatewayGrantNodeFingerprint(node)
 	cached, ok := c.gatewayGrantCache[cacheKey]
 	if opts.refresh {
-		if !opts.forceReissue && opts.lastSessionID != 0 && ok &&
-			cached.nodeFingerprint == nodeFingerprint &&
-			cached.grant != nil &&
-			cached.grant.GetSessionId() == opts.lastSessionID &&
-			cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
-			grant := cloneGatewayAccessGrant(cached.grant)
-			grant.PolicyRev = policyRev
-			return grant, false
-		}
-		if !opts.forceReissue && opts.lastSessionID == 0 && ok &&
+		if !opts.forceReissue && ok &&
 			cached.nodeFingerprint == nodeFingerprint &&
 			cached.grant != nil &&
 			cached.expireUnixMs > now.Add(30*time.Second).UnixMilli() {
-			grant := cloneGatewayAccessGrant(cached.grant)
-			grant.PolicyRev = policyRev
-			return grant, false
+			if opts.lastSessionID == 0 || opts.lastSessionIDValid {
+				grant := cloneGatewayAccessGrant(cached.grant)
+				grant.PolicyRev = policyRev
+				return grant, false
+			}
 		}
 	} else if ok &&
 		cached.nodeFingerprint == nodeFingerprint &&
@@ -2410,6 +2407,16 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 		grant:           cloneGatewayAccessGrant(grant),
 	}
 	return grant, true
+}
+
+func (c *Controller) gatewayGrantSessionKnownLocked(virtualIP uint32, deviceID string, sessionID uint64) bool {
+	prefix := fmt.Sprintf("%d|%s|", virtualIP, deviceID)
+	for key, cacheItem := range c.gatewayGrantCache {
+		if strings.HasPrefix(key, prefix) && cacheItem.grant != nil && cacheItem.grant.GetSessionId() == sessionID {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Controller) pruneGatewayGrantCacheLocked(now time.Time, nodes []GatewayNodeInfo) {

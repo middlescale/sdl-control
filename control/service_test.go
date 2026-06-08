@@ -2693,6 +2693,75 @@ func TestRefreshGatewayGrantPacketReusesSessionWhenMatched(t *testing.T) {
 	}
 }
 
+func TestRefreshGatewayGrantPacketReusesAllGatewaySessionsWhenOneSessionMatches(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+	ctrl.RegisterGatewayNode("jp-1", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, "", nil)
+
+	regReq := newBaseRegisterReq("dev-refresh-multi-a", "node-refresh-multi-a")
+	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.36"), Port: 3636})
+	grants := regResp.GetGatewayAccessGrants()
+	if len(grants) != 2 {
+		t.Fatalf("expected two gateway grants in registration response, got %d", len(grants))
+	}
+
+	var matchedGrant *pb.GatewayAccessGrant
+	for _, grant := range grants {
+		if grant.GetGatewayId() == "gw-default" {
+			matchedGrant = grant
+			break
+		}
+	}
+	if matchedGrant == nil {
+		t.Fatalf("expected gw-default grant in registration response")
+	}
+
+	req := &pb.RefreshGatewayGrantRequest{
+		VirtualIp:     regResp.GetVirtualIp(),
+		DeviceId:      regReq.GetDeviceId(),
+		LastSessionId: matchedGrant.GetSessionId(),
+		LastPolicyRev: regResp.GetGatewayPolicyRev(),
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal refresh gateway grant request failed: %v", err)
+	}
+	respPacket, err := ctrl.HandleRefreshGatewayGrantPacket(&protocol.Packet{
+		Ver:       protocol.V3,
+		Proto:     protocol.ProtocolService,
+		AppProto:  protocol.AppProtoRefreshGatewayGrantRequest,
+		SourceTTL: protocol.MAX_TTL,
+		TTL:       protocol.MAX_TTL,
+		SrcIP:     util.Uint32ToIP(regResp.GetVirtualIp()),
+		DstIP:     util.Uint32ToIP(regResp.GetVirtualGateway()),
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("HandleRefreshGatewayGrantPacket failed: %v", err)
+	}
+
+	var resp pb.RefreshGatewayGrantResponse
+	if err := proto.Unmarshal(respPacket.Payload, &resp); err != nil {
+		t.Fatalf("unmarshal refresh gateway grant response failed: %v", err)
+	}
+	if resp.GetHasUpdate() {
+		t.Fatalf("expected multi-gateway refresh response to remain unchanged, got %+v", resp)
+	}
+	if resp.GetResult() != pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_NO_CHANGE {
+		t.Fatalf("expected no-change refresh result, got %v", resp.GetResult())
+	}
+	if resp.GetReason() != "gateway grant unchanged" {
+		t.Fatalf("unexpected refresh reason: %s", resp.GetReason())
+	}
+	if resp.GetGatewayAccessGrant() != nil || len(resp.GetGatewayAccessGrants()) != 0 {
+		t.Fatalf("expected no grant payload for no-change refresh response, got %+v", resp)
+	}
+	if resp.GetGatewayPolicyRev() != regResp.GetGatewayPolicyRev() {
+		t.Fatalf("expected gateway policy rev to stay at %d, got %d", regResp.GetGatewayPolicyRev(), resp.GetGatewayPolicyRev())
+	}
+}
+
 func TestRefreshGatewayGrantPacketForceReissueRotatesSession(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
