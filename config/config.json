@@ -1,6 +1,6 @@
 {
     "default_domain": "ms.net",
-    "default_gateway_id": "default-gateway",
+    "default_gateway_id": "default",
     "gateway_ticket_secret": "dev-gateway-ticket-secret-change-me",
     "dns_service_addr": "127.0.0.1:53",
     "domains": {

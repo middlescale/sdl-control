@@ -140,8 +140,24 @@ const deviceAuthChallengeTTL = 60 * time.Second
 const gatewayReportFreshnessWindow = 2 * time.Minute
 const gatewayGrantLease = 5 * time.Minute
 const gatewayGrantGrace = 45 * time.Second
-const gatewayGrantHardTTL = 24 * time.Hour
-const gatewayGrantSoftRefreshLead = 10 * time.Minute
+const defaultGatewayID = "default"
+const defaultGatewayHost = "gateway.middlescale.net"
+
+var gatewayGrantHardTTL = durationFromEnvSeconds("GATEWAY_GRANT_HARD_TTL_SECONDS", 24*time.Hour)
+var gatewayGrantSoftRefreshLead = durationFromEnvSeconds("GATEWAY_GRANT_SOFT_REFRESH_LEAD_SECONDS", 10*time.Minute)
+
+func durationFromEnvSeconds(name string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	seconds, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || seconds <= 0 {
+		log.Warnf("invalid %s=%q, using %s", name, raw, fallback)
+		return fallback
+	}
+	return time.Duration(seconds) * time.Second
+}
 
 type PunchSessionState string
 
@@ -1885,6 +1901,10 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 	if primaryEndpoint == "" {
 		return nil, fmt.Errorf("gateway_channels must include at least one valid addr")
 	}
+	if strings.TrimSpace(req.GetGatewayId()) == strings.TrimSpace(c.cfg.DefaultGatewayID) &&
+		gatewayServerName(primaryEndpoint) != defaultGatewayHost {
+		return nil, fmt.Errorf("default gateway host must be %s", defaultGatewayHost)
+	}
 	now := time.Now()
 	if err := c.authenticateGatewayReport(&req, now); err != nil {
 		return c.buildGatewayReportAck(packet, &pb.GatewayReportAck{
@@ -2073,17 +2093,6 @@ func (c *Controller) ListGateways() []GatewayAdminView {
 	now := time.Now()
 	byID := map[string]GatewayAdminView{}
 	defaultID := strings.TrimSpace(c.cfg.DefaultGatewayID)
-	if defaultID != "" {
-		item := GatewayAdminView{
-			GatewayID: defaultID,
-			Approved:  true,
-			Default:   true,
-		}
-		if endpoint, ok := c.gatewayAllow[defaultID]; ok {
-			item.Endpoint = endpoint
-		}
-		byID[defaultID] = item
-	}
 	for gatewayID, endpoint := range c.gatewayAllow {
 		item := byID[gatewayID]
 		item.GatewayID = gatewayID
@@ -2713,7 +2722,7 @@ func gatewayServerName(endpoint string) string {
 	}
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return "gateway.middlescale.net"
+		return defaultGatewayHost
 	}
 	return host
 }

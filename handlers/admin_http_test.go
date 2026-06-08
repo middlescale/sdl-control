@@ -54,7 +54,7 @@ func newTestController(t *testing.T) *control.Controller {
 	}
 	cfgJSON := `{
 		"default_domain":"ms.net",
-		"default_gateway_id":"default-gateway",
+		"default_gateway_id":"default",
 		"gateway_ticket_secret":"test-secret",
 		"listen_addr":":443",
 		"admin_http_addr":"127.0.0.1:8081",

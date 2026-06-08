@@ -2023,7 +2023,7 @@ func TestBuildRegistrationErrorPacketSetsMachineReadableReason(t *testing.T) {
 func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
-	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "gw-default", "gateway.middlescale.net:51820", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
 	packet := newGatewayReportPacket(t, report)
 	resp, err := ctrl.HandleGatewayReportPacket(packet)
 	if err != nil {
@@ -2042,7 +2042,7 @@ func TestGatewayReportAndRegistrationGrant(t *testing.T) {
 	if grant == nil {
 		t.Fatalf("expected gateway access grant in registration response")
 	}
-	if len(grant.GetGatewayChannels()) != 1 || grant.GetGatewayChannels()[0].GetAddr() != "quic://127.0.0.1:51820" {
+	if len(grant.GetGatewayChannels()) != 1 || grant.GetGatewayChannels()[0].GetAddr() != "quic://gateway.middlescale.net:51820" {
 		t.Fatalf("unexpected gateway channels: %+v", grant.GetGatewayChannels())
 	}
 	if len(grant.GetGatewayCapabilities()) == 0 || grant.GetGatewayCapabilities()[0] != "udp_blind_relay_v1" {
@@ -2257,6 +2257,21 @@ func TestGatewayDelistDefaultGatewayRejected(t *testing.T) {
 	}
 }
 
+func TestListGatewaysDoesNotSynthesizeDefaultRow(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	if got := ctrl.ListGateways(); len(got) != 0 {
+		t.Fatalf("expected no synthetic default gateway row, got %+v", got)
+	}
+}
+
 func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	ctrl := newControllerWithConfig(t, &config.Config{
 		Gateway:             net.ParseIP("10.26.0.1"),
@@ -2278,6 +2293,22 @@ func TestGatewayReportAllowsConfiguredDefaultGateway(t *testing.T) {
 	}
 	if !ack.GetOk() {
 		t.Fatalf("expected default gateway auto-allowed, ack=%+v", ack)
+	}
+}
+
+func TestGatewayReportRejectsDefaultGatewayWrongHost(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+	report := newSignedGatewayReport(t, testGatewayTicketSecret, "default", "badhost:29901", []string{"udp_blind_relay_v1"}, time.Now(), randomGatewayNonce(t))
+	_, err := ctrl.HandleGatewayReportPacket(newGatewayReportPacket(t, report))
+	if err == nil || !strings.Contains(err.Error(), "default gateway host must be gateway.middlescale.net") {
+		t.Fatalf("expected default gateway host rejection, got %v", err)
 	}
 }
 

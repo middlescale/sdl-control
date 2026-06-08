@@ -42,6 +42,8 @@ type Config struct {
 	DebugCollectKeepPerDevice int                     `json:"debug_collect_keep_per_device,omitempty"`
 }
 
+const defaultGatewayID = "default"
+
 type GroupConfig struct {
 	Gateway         net.IP   `json:"gateway"`
 	Netmask         string   `json:"netmask"`
@@ -75,7 +77,7 @@ func LoadConfig(path string) (*Config, error) {
 // Validate 校验配置字段格式
 func (c *Config) Validate() error {
 	if strings.TrimSpace(c.DefaultGatewayID) == "" {
-		return errors.New("default_gateway_id 不能为空")
+		c.DefaultGatewayID = defaultGatewayID
 	}
 	if strings.TrimSpace(c.GatewayTicketSecret) == "" {
 		return errors.New("gateway_ticket_secret 不能为空")

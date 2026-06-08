@@ -100,7 +100,7 @@ Gateway registration/keepalive uses shared-secret HMAC auth plus separate admin 
 ```json
 {
   "default_domain": "ms.net",
-  "default_gateway_id": "default-gateway",
+  "default_gateway_id": "default",
   "domains": {
     "ms.net": {
       "groups": {

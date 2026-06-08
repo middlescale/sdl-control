@@ -33,3 +33,15 @@ func TestValidatePassesWithoutDedicatedHTTP3ListenAddr(t *testing.T) {
 		t.Fatalf("expected config validation to pass without http3_listen_addr, got %v", err)
 	}
 }
+
+func TestValidateDefaultsGatewayIDToDefault(t *testing.T) {
+	cfg := validConfig()
+	cfg.DefaultGatewayID = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected config validation to pass, got %v", err)
+	}
+	if cfg.DefaultGatewayID != "default" {
+		t.Fatalf("expected default gateway id to default to default, got %q", cfg.DefaultGatewayID)
+	}
+}

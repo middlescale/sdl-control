@@ -44,7 +44,7 @@
 ```json
 {
   "default_domain": "ms.net",
-  "default_gateway_id": "default-gateway",
+  "default_gateway_id": "default",
   "domains": {
     "ms.net": {
       "groups": {
@@ -72,7 +72,7 @@
 - `autocert_http_addr`：内置 ACME `HTTP-01` challenge server 监听地址，默认 `:80`。
 - `autocert_email`：ACME 账户联系邮箱，可选但推荐配置。
 - `default_domain`：创建用户时未指定域名时使用，默认建议 `ms.net`。
-- `default_gateway_id`：默认下发给客户端的 gateway 身份标识。control 只按这个 `gateway_id` 选择默认网关，实际地址来自 gateway 上报并落到本地 `gateway` 状态文件的 `gateway_id -> endpoint` 记录。
+- `default_gateway_id`：默认下发给客户端的 gateway 身份标识，默认值是 `default`。control 只按这个 `gateway_id` 选择默认网关，实际地址来自 gateway 上报并落到本地 `gateway` 状态文件的 `gateway_id -> endpoint` 记录；默认网关的上报主机必须是 `gateway.middlescale.net`。
 - `dns_service_ip`：为 `sdl-dns` 预留的固定虚拟 IP；可放在顶层作为默认值，也可放在 `domains.<domain>.groups.<group>` 下做 group 覆盖。普通客户端自动分配会跳过这个地址，`sdl-dns` 可在注册时显式请求它。
 - `dns_service_addr`：control 本机代理 DNS 查询时转发到的实际地址，格式为 `host:port`，默认 `127.0.0.1:53`；容器化部署时通常应配置成 `sdl-dns:53`。
 - `dns_servers`：给客户端 split DNS 下发的 DNS 服务器 IPv4 列表；可放在顶层作为默认值，也可放在 `domains.<domain>.groups.<group>` 下做覆盖。
@@ -218,7 +218,7 @@ Authorization: Bearer <ADMIN_HTTP_TOKEN>
 Gateway 注册/保活分为两层：
 
 - **HMAC 鉴权**：gateway 每次发送 `GatewayReportRequest` 都必须携带 `nonce + signature`。signature 覆盖 `GatewayReportProof`（`gateway_id + capabilities + report_unix_ms + nonce + gateway_channels + default_gateway_channel + gateway_udp_public_key + gateway_udp_key_id` 的 protobuf 编码），由 control 使用 `gateway_ticket_secret` 做 HMAC-SHA256 校验；control 同时对 `report_unix_ms + nonce` 执行新鲜度/重放保护。
-- **管理批准**：鉴权通过后，除配置中的 `default_gateway_id` 对应 gateway 外，其他 gateway 仍需先经 `sdl-admin gateway --enlist <id>` 批准，其 `GatewayReportRequest` 才会返回成功。默认 gateway 第一次成功上报后，control 会把该 `gateway_id` 当前的 `endpoint` 持久化到本地状态文件，后续给客户端下发默认网关时直接读取这份映射。`sdl-admin gateway --list` 可查看默认网关、待批准上报与已批准网关状态（含 `alive` 保活状态）；`sdl-admin gateway --delist <id>` 可撤销已批准网关并触发客户端刷新。
+- **管理批准**：鉴权通过后，除配置中的 `default_gateway_id` 对应 gateway 外，其他 gateway 仍需先经 `sdl-admin gateway --enlist <id>` 批准，其 `GatewayReportRequest` 才会返回成功。默认 gateway 的主机名固定要求为 `gateway.middlescale.net`。`sdl-admin gateway --list` 只显示已上报/已批准网关状态（含 `alive` 保活状态，默认网关若未上报不会单独合成一行）；`sdl-admin gateway --delist <id>` 可撤销已批准网关并触发客户端刷新。
 
 control 对已批准网关采用租约保活（90 秒），并基于 `report_unix_ms + nonce` 做有限时间窗内的重放保护；超时未上报的网关不会继续被下发给客户端。
 
