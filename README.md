@@ -217,7 +217,7 @@ Authorization: Bearer <ADMIN_HTTP_TOKEN>
 
 Gateway 注册/保活分为两层：
 
-- **HMAC 鉴权**：gateway 每次发送 `GatewayReportRequest` 都必须携带 `nonce + signature`。signature 覆盖 `GatewayReportProof`（`gateway_id + capabilities + report_unix_ms + nonce + gateway_channels + default_gateway_channel + gateway_udp_public_key + gateway_udp_key_id` 的 protobuf 编码），由 control 使用 `gateway_ticket_secret` 做 HMAC-SHA256 校验；control 同时对 `report_unix_ms + nonce` 执行新鲜度/重放保护。
+- **HMAC 鉴权**：gateway 每次发送 `GatewayReportRequest` 都必须携带 `nonce + signature`。signature 覆盖 `GatewayReportProof`（`gateway_id + capabilities + report_unix_ms + nonce + gateway_channel` 的 protobuf 编码）；UDP channel 自身包含 `udp_public_key + udp_key_id`。control 使用 `gateway_ticket_secret` 做 HMAC-SHA256 校验，并对 `report_unix_ms + nonce` 执行新鲜度/重放保护。
 - **管理批准**：鉴权通过后，除配置中的 `default_gateway_id` 对应 gateway 外，其他 gateway 仍需先经 `sdl-admin gateway --enlist <id>` 批准，其 `GatewayReportRequest` 才会返回成功。默认 gateway 的主机名固定要求为 `gateway.middlescale.net`。`sdl-admin gateway --list` 只显示已上报/已批准网关状态（含 `alive` 保活状态，默认网关若未上报不会单独合成一行）；`sdl-admin gateway --delist <id>` 可撤销已批准网关并触发客户端刷新。
 
 control 对已批准网关采用租约保活（90 秒），并基于 `report_unix_ms + nonce` 做有限时间窗内的重放保护；超时未上报的网关不会继续被下发给客户端。
@@ -225,7 +225,7 @@ control 对已批准网关采用租约保活（90 秒），并基于 `report_uni
 当前 gateway 下发模型是 channel-aware 的：
 
 - `client -> gateway` 默认使用 UDP secure channel
-- control 下发 `gateway_udp_public_key` / `gateway_udp_key_id` 给客户端完成 UDP bootstrap
+- control 在 UDP `gateway_channel` 中下发 `udp_public_key` / `udp_key_id` 给客户端完成 UDP bootstrap
 - 若 gateway 同时上报 QUIC channel，control 也会把对应的 `server_name` 和可选 CA PEM 一并下发，供客户端做 QUIC fallback
 
 设备认证（auth device）由 `sdl auth` 发起：客户端输入 `--userId`、可选 `--group`（默认 `default.ms.net`）和 `ticket` 发送到 `sdl-control`，认证成功后设备才可注册入网。当前认证成功后的默认有效期为 30 天。

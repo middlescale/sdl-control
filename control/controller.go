@@ -64,14 +64,11 @@ type Controller struct {
 }
 
 type GatewayNodeInfo struct {
-	GatewayID      string
-	Endpoint       string
-	Capabilities   []string
-	Channels       []*pb.GatewayChannel
-	DefaultChannel pb.GatewayChannelKind
-	UDPKeyID       string
-	UDPPublicKey   []byte
-	UpdatedAt      time.Time
+	GatewayID    string
+	Endpoint     string
+	Capabilities []string
+	Channels     []*pb.GatewayChannel
+	UpdatedAt    time.Time
 }
 
 type cachedGatewayGrant struct {
@@ -1890,16 +1887,21 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 	if strings.TrimSpace(req.GetGatewayId()) == "" {
 		return nil, fmt.Errorf("gateway_id is required")
 	}
-	if len(req.GetGatewayChannels()) == 0 {
-		return nil, fmt.Errorf("gateway_channels is required")
+	if req.GetGatewayChannel() == nil {
+		return nil, fmt.Errorf("gateway_channel is required")
 	}
 	if req.GetReportUnixMs() == 0 {
 		return nil, fmt.Errorf("report_unix_ms is required")
 	}
-	normalizedChannels := cloneGatewayChannels(req.GetGatewayChannels())
+	normalizedChannels := cloneGatewayChannels([]*pb.GatewayChannel{req.GetGatewayChannel()})
 	primaryEndpoint := primaryGatewayEndpoint(normalizedChannels)
 	if primaryEndpoint == "" {
-		return nil, fmt.Errorf("gateway_channels must include at least one valid addr")
+		return nil, fmt.Errorf("gateway_channel must include a valid addr")
+	}
+	channel := normalizedChannels[0]
+	if channel.GetKind() == pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP &&
+		(len(channel.GetUdpPublicKey()) != 32 || channel.GetUdpKeyId() == "") {
+		return nil, fmt.Errorf("UDP gateway_channel requires a 32-byte udp_public_key and udp_key_id")
 	}
 	if strings.TrimSpace(req.GetGatewayId()) == strings.TrimSpace(c.cfg.DefaultGatewayID) &&
 		gatewayServerName(primaryEndpoint) != defaultGatewayHost {
@@ -1915,14 +1917,11 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 		})
 	}
 	c.recordGatewaySeen(GatewayNodeInfo{
-		GatewayID:      req.GetGatewayId(),
-		Endpoint:       primaryEndpoint,
-		Capabilities:   append([]string{}, req.GetCapabilities()...),
-		Channels:       normalizedChannels,
-		DefaultChannel: normalizeGatewayChannelKind(req.GetDefaultGatewayChannel()),
-		UDPKeyID:       strings.TrimSpace(req.GetGatewayUdpKeyId()),
-		UDPPublicKey:   append([]byte(nil), req.GetGatewayUdpPublicKey()...),
-		UpdatedAt:      now,
+		GatewayID:    req.GetGatewayId(),
+		Endpoint:     primaryEndpoint,
+		Capabilities: append([]string{}, req.GetCapabilities()...),
+		Channels:     normalizedChannels,
+		UpdatedAt:    now,
 	})
 	if !c.isGatewayAllowed(req.GetGatewayId(), primaryEndpoint) {
 		return c.buildGatewayReportAck(packet, &pb.GatewayReportAck{
@@ -1936,9 +1935,6 @@ func (c *Controller) HandleGatewayReportPacket(packet *protocol.Packet) (*protoc
 		req.GetGatewayId(),
 		req.GetCapabilities(),
 		normalizedChannels,
-		req.GetDefaultGatewayChannel(),
-		req.GetGatewayUdpKeyId(),
-		req.GetGatewayUdpPublicKey(),
 	)
 
 	ack := &pb.GatewayReportAck{
@@ -1974,14 +1970,11 @@ func (c *Controller) authenticateGatewayReport(req *pb.GatewayReportRequest, now
 
 func marshalGatewayReportProof(req *pb.GatewayReportRequest) ([]byte, error) {
 	return proto.MarshalOptions{Deterministic: true}.Marshal(&pb.GatewayReportProof{
-		GatewayId:             req.GetGatewayId(),
-		Capabilities:          append([]string{}, req.GetCapabilities()...),
-		ReportUnixMs:          req.GetReportUnixMs(),
-		Nonce:                 append([]byte(nil), req.GetNonce()...),
-		GatewayChannels:       cloneGatewayChannels(req.GetGatewayChannels()),
-		DefaultGatewayChannel: req.GetDefaultGatewayChannel(),
-		GatewayUdpPublicKey:   append([]byte(nil), req.GetGatewayUdpPublicKey()...),
-		GatewayUdpKeyId:       req.GetGatewayUdpKeyId(),
+		GatewayId:      req.GetGatewayId(),
+		Capabilities:   append([]string{}, req.GetCapabilities()...),
+		ReportUnixMs:   req.GetReportUnixMs(),
+		Nonce:          append([]byte(nil), req.GetNonce()...),
+		GatewayChannel: cloneGatewayChannel(req.GetGatewayChannel()),
 	})
 }
 
@@ -2236,9 +2229,6 @@ func (c *Controller) RegisterGatewayNode(gatewayID, endpoint string, capabilitie
 			Addr:       "quic://" + strings.TrimSpace(endpoint),
 			ServerName: gatewayServerName(endpoint),
 		}},
-		pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN,
-		"",
-		nil,
 	)
 }
 
@@ -2246,9 +2236,6 @@ func (c *Controller) RegisterGatewayNodeWithTransport(
 	gatewayID string,
 	capabilities []string,
 	channels []*pb.GatewayChannel,
-	defaultChannel pb.GatewayChannelKind,
-	udpKeyID string,
-	udpPublicKey []byte,
 ) {
 	c.gatewayMu.Lock()
 	normalizedChannels := cloneGatewayChannels(channels)
@@ -2260,14 +2247,11 @@ func (c *Controller) RegisterGatewayNodeWithTransport(
 	}
 	c.gatewayAllow[gatewayID] = endpoint
 	c.gatewayNodes[gatewayID] = GatewayNodeInfo{
-		GatewayID:      gatewayID,
-		Endpoint:       endpoint,
-		Capabilities:   append([]string{}, capabilities...),
-		Channels:       normalizedChannels,
-		DefaultChannel: normalizeGatewayChannelKind(defaultChannel),
-		UDPKeyID:       strings.TrimSpace(udpKeyID),
-		UDPPublicKey:   append([]byte(nil), udpPublicKey...),
-		UpdatedAt:      time.Now(),
+		GatewayID:    gatewayID,
+		Endpoint:     endpoint,
+		Capabilities: append([]string{}, capabilities...),
+		Channels:     normalizedChannels,
+		UpdatedAt:    time.Now(),
 	}
 	delete(c.gatewaySeen, gatewayID)
 	c.persistGatewayApprovalLocked()
@@ -2474,16 +2458,6 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 		log.Warnf("skip gateway grant with no valid channels: gateway_id=%s", node.GatewayID)
 		return nil
 	}
-	defaultChannel := normalizeGatewayChannelKind(node.DefaultChannel)
-	if defaultChannel == pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN {
-		if hasGatewayChannelKind(grantChannels, pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP) {
-			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP
-		} else if hasGatewayChannelKind(grantChannels, pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS) {
-			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_HTTPS
-		} else {
-			defaultChannel = pb.GatewayChannelKind_GATEWAY_CHANNEL_QUIC
-		}
-	}
 	return &pb.GatewayAccessGrant{
 		Ticket:                 ticket,
 		TicketExpireUnixMs:     expireUnixMs,
@@ -2492,10 +2466,7 @@ func (c *Controller) buildGatewayAccessGrantForNode(
 		GatewayCapabilities:    append([]string{}, node.Capabilities...),
 		LeaseSecs:              leaseSecs,
 		GraceSecs:              graceSecs,
-		GatewayChannels:        cloneGatewayChannels(grantChannels),
-		DefaultGatewayChannel:  defaultChannel,
-		GatewayUdpPublicKey:    append([]byte(nil), node.UDPPublicKey...),
-		GatewayUdpKeyId:        node.UDPKeyID,
+		GatewayChannel:         cloneGatewayChannel(grantChannels[0]),
 		GatewayId:              node.GatewayID,
 		SoftRefreshAfterUnixMs: refreshAfterUnixMs,
 		HardExpireUnixMs:       expireUnixMs,
@@ -2541,14 +2512,7 @@ func (c *Controller) approvedAliveGatewayNodesLocked(now time.Time) []GatewayNod
 func gatewayGrantFingerprint(nodes []GatewayNodeInfo) string {
 	parts := make([]string, 0, len(nodes))
 	for _, node := range nodes {
-		parts = append(parts, fmt.Sprintf(
-			"%s|%s|%d|%s|%x",
-			node.GatewayID,
-			node.Endpoint,
-			node.DefaultChannel,
-			node.UDPKeyID,
-			node.UDPPublicKey,
-		))
+		parts = append(parts, gatewayGrantNodeFingerprint(node))
 	}
 	return strings.Join(parts, ",")
 }
@@ -2592,16 +2556,20 @@ func gatewayGrantNodeFingerprint(node GatewayNodeInfo) string {
 	parts := []string{
 		node.GatewayID,
 		node.Endpoint,
-		fmt.Sprintf("%d", node.DefaultChannel),
-		node.UDPKeyID,
-		hex.EncodeToString(node.UDPPublicKey),
 		strings.Join(node.Capabilities, ","),
 	}
 	for _, channel := range node.Channels {
 		if channel == nil {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%d|%s|%s", channel.GetKind(), channel.GetAddr(), channel.GetServerName()))
+		parts = append(parts, fmt.Sprintf(
+			"%d|%s|%s|%s|%x",
+			channel.GetKind(),
+			channel.GetAddr(),
+			channel.GetServerName(),
+			channel.GetUdpKeyId(),
+			channel.GetUdpPublicKey(),
+		))
 	}
 	return strings.Join(parts, ";")
 }
@@ -2620,13 +2588,26 @@ func cloneGatewayChannels(channels []*pb.GatewayChannel) []*pb.GatewayChannel {
 		if addr == "" {
 			continue
 		}
-		cloned = append(cloned, &pb.GatewayChannel{
+		clonedChannel := &pb.GatewayChannel{
 			Kind:       kind,
 			Addr:       addr,
 			ServerName: strings.TrimSpace(channel.GetServerName()),
-		})
+		}
+		if kind == pb.GatewayChannelKind_GATEWAY_CHANNEL_UDP {
+			clonedChannel.UdpPublicKey = append([]byte(nil), channel.GetUdpPublicKey()...)
+			clonedChannel.UdpKeyId = strings.TrimSpace(channel.GetUdpKeyId())
+		}
+		cloned = append(cloned, clonedChannel)
 	}
 	return cloned
+}
+
+func cloneGatewayChannel(channel *pb.GatewayChannel) *pb.GatewayChannel {
+	channels := cloneGatewayChannels([]*pb.GatewayChannel{channel})
+	if len(channels) == 0 {
+		return nil
+	}
+	return channels[0]
 }
 
 func normalizeGatewayChannelAddr(kind pb.GatewayChannelKind, raw string) string {
@@ -2668,15 +2649,6 @@ func normalizeGatewayChannelKind(kind pb.GatewayChannelKind) pb.GatewayChannelKi
 	default:
 		return pb.GatewayChannelKind_GATEWAY_CHANNEL_UNKNOWN
 	}
-}
-
-func hasGatewayChannelKind(channels []*pb.GatewayChannel, kind pb.GatewayChannelKind) bool {
-	for _, channel := range channels {
-		if channel != nil && normalizeGatewayChannelKind(channel.GetKind()) == kind {
-			return true
-		}
-	}
-	return false
 }
 
 func primaryGatewayEndpoint(channels []*pb.GatewayChannel) string {
