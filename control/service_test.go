@@ -2639,6 +2639,148 @@ func TestRegistrationIncludesAllApprovedAliveGateways(t *testing.T) {
 	}
 }
 
+func TestStaleGatewayIsRetainedForExistingClientButNotAssignedToNewClient(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+	ctrl.RegisterGatewayNode("jp-1", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, "", nil)
+
+	firstReq := newBaseRegisterReq("dev-stale-existing-a", "node-stale-existing-a")
+	firstResp := mustRegister(t, ctrl, firstReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.71"), Port: 7171})
+	if len(firstResp.GetGatewayAccessGrants()) != 2 {
+		t.Fatalf("expected first client to receive two gateway grants")
+	}
+	var staleSessionID uint64
+	for _, grant := range firstResp.GetGatewayAccessGrants() {
+		if grant.GetGatewayId() == "jp-1" {
+			staleSessionID = grant.GetSessionId()
+		}
+	}
+	if staleSessionID == 0 {
+		t.Fatalf("expected jp-1 grant in first registration")
+	}
+
+	ctrl.gatewayMu.Lock()
+	node := ctrl.gatewayNodes["jp-1"]
+	node.UpdatedAt = time.Now().Add(-2 * gatewayNodeLease)
+	ctrl.gatewayNodes["jp-1"] = node
+	ctrl.gatewayMu.Unlock()
+
+	existingGrants, _ := ctrl.buildGatewayAccessGrantsForExistingClient(firstResp.GetVirtualIp(), firstReq.GetDeviceId())
+	if len(existingGrants) != 2 {
+		t.Fatalf("expected existing client to retain stale gateway grant, got %d grants", len(existingGrants))
+	}
+	if existingGrants[0].GetGatewayId() != "gw-default" {
+		t.Fatalf("expected default gateway to remain primary, got %s", existingGrants[0].GetGatewayId())
+	}
+	var retainedSessionID uint64
+	for _, grant := range existingGrants {
+		if grant.GetGatewayId() == "jp-1" {
+			retainedSessionID = grant.GetSessionId()
+		}
+	}
+	if retainedSessionID != staleSessionID {
+		t.Fatalf("expected stale gateway session %d to be retained, got %d", staleSessionID, retainedSessionID)
+	}
+	refreshedGrants, _, _ := ctrl.buildGatewayAccessGrantsForRefresh(
+		firstResp.GetVirtualIp(),
+		firstReq.GetDeviceId(),
+		staleSessionID,
+		false,
+	)
+	if len(refreshedGrants) != 2 {
+		t.Fatalf("expected refresh to retain stale gateway grant, got %d grants", len(refreshedGrants))
+	}
+	reconnectedResp := mustRegister(
+		t,
+		ctrl,
+		firstReq,
+		&net.UDPAddr{IP: net.ParseIP("1.1.1.75"), Port: 7575},
+	)
+	if len(reconnectedResp.GetGatewayAccessGrants()) != 2 {
+		t.Fatalf("expected reconnecting client to retain stale gateway grant")
+	}
+
+	secondReq := newBaseRegisterReq("dev-stale-existing-b", "node-stale-existing-b")
+	secondResp := mustRegister(t, ctrl, secondReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.72"), Port: 7272})
+	grants := secondResp.GetGatewayAccessGrants()
+	if len(grants) != 1 || grants[0].GetGatewayId() != "gw-default" {
+		t.Fatalf("expected new client to receive only alive gateway, got %+v", grants)
+	}
+}
+
+func TestGatewayChangePushRetainsStaleGatewayForExistingClient(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+	ctrl.RegisterGatewayNode("jp-1", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, "", nil)
+	regReq := newBaseRegisterReq("dev-stale-push-a", "node-stale-push-a")
+	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.73"), Port: 7373})
+
+	ctrl.gatewayMu.Lock()
+	node := ctrl.gatewayNodes["jp-1"]
+	node.UpdatedAt = time.Now().Add(-2 * gatewayNodeLease)
+	ctrl.gatewayNodes["jp-1"] = node
+	ctrl.gatewayMu.Unlock()
+
+	packets, err := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded()
+	if err != nil {
+		t.Fatalf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded failed: %v", err)
+	}
+	if len(packets) == 0 {
+		t.Fatalf("expected gateway policy change push")
+	}
+	var pushed pb.DeviceList
+	found := false
+	for _, packet := range packets {
+		if !packet.DstIP.Equal(util.Uint32ToIP(regResp.GetVirtualIp())) {
+			continue
+		}
+		if err := proto.Unmarshal(packet.Payload, &pushed); err != nil {
+			t.Fatalf("unmarshal gateway change push failed: %v", err)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("expected push for existing client")
+	}
+	if len(pushed.GetGatewayAccessGrants()) != 2 {
+		t.Fatalf("expected push to retain stale gateway grant, got %+v", pushed.GetGatewayAccessGrants())
+	}
+}
+
+func TestDelistRemovesRetainedStaleGatewayGrant(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	ctrl.RegisterGatewayNode("gw-default", "127.0.0.1:51820", []string{"udp_blind_relay_v1"}, "", nil)
+	ctrl.RegisterGatewayNode("jp-1", "127.0.0.1:51821", []string{"udp_blind_relay_v1"}, "", nil)
+	regReq := newBaseRegisterReq("dev-stale-delist-a", "node-stale-delist-a")
+	regResp := mustRegister(t, ctrl, regReq, &net.UDPAddr{IP: net.ParseIP("1.1.1.74"), Port: 7474})
+
+	ctrl.gatewayMu.Lock()
+	node := ctrl.gatewayNodes["jp-1"]
+	node.UpdatedAt = time.Now().Add(-2 * gatewayNodeLease)
+	ctrl.gatewayNodes["jp-1"] = node
+	ctrl.gatewayMu.Unlock()
+
+	if err := ctrl.DelistGatewayNodeByID("jp-1"); err != nil {
+		t.Fatalf("DelistGatewayNodeByID failed: %v", err)
+	}
+	grants, _ := ctrl.buildGatewayAccessGrantsForExistingClient(regResp.GetVirtualIp(), regReq.GetDeviceId())
+	if len(grants) != 1 || grants[0].GetGatewayId() != "gw-default" {
+		t.Fatalf("expected delist to revoke stale gateway grant, got %+v", grants)
+	}
+	for _, cached := range ctrl.gatewayGrantCache {
+		if cached.gatewayID == "jp-1" {
+			t.Fatalf("expected delist to remove cached jp-1 grants")
+		}
+	}
+}
+
 func TestPushDeviceListReusesGatewayGrantSession(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
