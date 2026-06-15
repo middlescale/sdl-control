@@ -15,6 +15,7 @@ type adminRequest struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	Sections     []string `json:"sections,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
+	Filter       string   `json:"filter,omitempty"`
 	Group        string   `json:"group,omitempty"`
 	DeviceID     string   `json:"device_id,omitempty"`
 	All          bool     `json:"all,omitempty"`
@@ -34,6 +35,7 @@ type adminResponse struct {
 	Ticket         string                     `json:"ticket,omitempty"`
 	ExpireAtUnix   int64                      `json:"expire_at_unix,omitempty"`
 	Gateways       []control.GatewayAdminView `json:"gateways,omitempty"`
+	Users          []control.UMUserAdminView  `json:"users,omitempty"`
 	Devices        []control.DeviceAdminView  `json:"devices,omitempty"`
 	UpdatedDevices []control.DeviceAdminView  `json:"updated_devices,omitempty"`
 	DNSSnapshot    *control.DNSSnapshotView   `json:"dns_snapshot,omitempty"`

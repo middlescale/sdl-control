@@ -19,6 +19,8 @@ func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminRespon
 			return adminResponse{OK: false, Error: err.Error()}
 		}
 		return adminResponse{OK: true, UserID: user.UserID, Name: user.Name, Domain: user.Domain}
+	case "list_users":
+		return adminResponse{OK: true, Users: ctrl.UMListUsers(strings.TrimSpace(req.Filter))}
 	case "issue_device_ticket", "issue_auth_ticket":
 		group := strings.TrimSpace(req.Group)
 		if group == "" {

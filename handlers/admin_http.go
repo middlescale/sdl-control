@@ -58,6 +58,7 @@ var adminReadActions = map[string]bool{
 	"list_gateway": true,
 	"list_device":  true,
 	"list_devices": true,
+	"list_users":   true,
 	"dns_domains":  true,
 	"dns_snapshot": true,
 }
@@ -90,6 +91,7 @@ func adminRequestFromHTTP(r *http.Request) (adminRequest, error) {
 	if r.Method == http.MethodGet {
 		q := r.URL.Query()
 		req.UserID = q.Get("user_id")
+		req.Filter = q.Get("filter")
 		req.Group = q.Get("group")
 		req.DeviceID = q.Get("device_id")
 		req.Domain = q.Get("domain")

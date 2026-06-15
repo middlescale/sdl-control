@@ -54,6 +54,10 @@ func (c *Controller) UMCreateUserWithID(userID string, group string, domain ...s
 	return c.um.CreateUserWithID(userID, selectedDomain, group)
 }
 
+func (c *Controller) UMListUsers(filter string) []UMUserAdminView {
+	return c.um.ListUsers(filter)
+}
+
 func (c *Controller) UMCreateEnrollment(userID string, ttl time.Duration) (UMEnrollment, error) {
 	return c.um.CreateEnrollment(userID, ttl)
 }

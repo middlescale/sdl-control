@@ -16,6 +16,20 @@ func TestParseGatewayList(t *testing.T) {
 	}
 }
 
+func TestParseUserCreate(t *testing.T) {
+	req := parseUser([]string{"--create", "-u", "user-1", "--group", "sales"})
+	if req.Action != "create_user" || req.UserID != "user-1" || req.Group != "sales" {
+		t.Fatalf("unexpected create user request: %+v", req)
+	}
+}
+
+func TestParseUserListFilter(t *testing.T) {
+	req := parseUser([]string{"--list", "--filter", "sdl-??-*"})
+	if req.Action != "list_users" || req.Filter != "sdl-??-*" {
+		t.Fatalf("unexpected list users request: %+v", req)
+	}
+}
+
 func TestParseGatewayEnlist(t *testing.T) {
 	req := parseGateway([]string{"--enlist", "gw-1"})
 	if req.Action != "gateway_enlist" {
@@ -69,6 +83,29 @@ func TestWriteResponseExtendDeviceExpiryShowsSummaryAndUpdatedDevices(t *testing
 		"Current devices",
 		"dev-1",
 	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
+		}
+	}
+}
+
+func TestWriteResponseListUsers(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	resp := adminResponse{
+		OK: true,
+		Users: []userInfo{{
+			UserID:        "sdl-user-1",
+			Group:         "user.ms.net",
+			Domain:        "ms.net",
+			CreatedAtUnix: 1_750_000_000,
+		}},
+	}
+	if err := writeResponse(&stdout, &stderr, "list_users", resp); err != nil {
+		t.Fatalf("writeResponse failed: %v", err)
+	}
+	out := stdout.String()
+	for _, want := range []string{"Users (1)", "USER ID", "GROUP", "DOMAIN", "sdl-user-1", "user.ms.net", "ms.net"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
 		}

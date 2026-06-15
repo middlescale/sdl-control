@@ -83,8 +83,9 @@ go test -v ./control          # Run tests with verbose output
 The `sdl-admin` tool provides administrative functionality through a Unix Domain Socket (default: `/tmp/sdl-control-admin.sock`):
 
 ```bash
-./sdl-admin createUser --userId user1 --group sales.ms.net
-./sdl-admin createUser -u user1
+./sdl-admin user --create --userId user1 --group sales.ms.net
+./sdl-admin user --create -u user1
+./sdl-admin user --list [--filter 'user-*']
 ./sdl-admin issueDeviceTicket --userId <user_id>
 ./sdl-admin issueDeviceTicket -u <user_id> -g sales.ms.net
 ./sdl-admin gateway --list

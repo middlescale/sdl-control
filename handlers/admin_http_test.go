@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,6 +42,29 @@ func TestAdminHTTPListDevices(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), `"ok":true`) {
 		t.Fatalf("expected ok response, got %s", rr.Body.String())
+	}
+}
+
+func TestAdminHTTPListUsersWithFilter(t *testing.T) {
+	ctrl := newTestController(t)
+	for _, userID := range []string{"sdl-alpha", "sdl-beta", "admin-1"} {
+		if _, err := ctrl.UMCreateUserWithID(userID, "sales", "ms.net"); err != nil {
+			t.Fatalf("create user %s failed: %v", userID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/list_users?filter=sdl-%3Feta", nil)
+	rec := httptest.NewRecorder()
+	adminHTTPHandler(ctrl).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp adminResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.OK || len(resp.Users) != 1 || resp.Users[0].UserID != "sdl-beta" {
+		t.Fatalf("unexpected response: %+v", resp)
 	}
 }
 

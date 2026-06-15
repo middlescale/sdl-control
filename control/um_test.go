@@ -1,6 +1,7 @@
 package control
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -145,6 +146,45 @@ func TestCreateUserWithIDIsIdempotent(t *testing.T) {
 	}
 	if user1.UserID != user2.UserID {
 		t.Fatalf("expected same user id, got %s and %s", user1.UserID, user2.UserID)
+	}
+}
+
+func TestListUsersFiltersByUserIDWildcardAndSorts(t *testing.T) {
+	um := NewUserManager()
+	for _, tc := range []struct {
+		userID string
+		group  string
+	}{
+		{userID: "sdl-charlie", group: "sales"},
+		{userID: "admin-1", group: "default"},
+		{userID: "sdl-alpha", group: "marketing"},
+		{userID: "sdl-beta-2", group: "sales"},
+	} {
+		if _, err := um.CreateUserWithID(tc.userID, "ms.net", tc.group); err != nil {
+			t.Fatalf("CreateUserWithID(%q) failed: %v", tc.userID, err)
+		}
+	}
+
+	users := um.ListUsers("sdl-?lpha")
+	if len(users) != 1 || users[0].UserID != "sdl-alpha" || users[0].Group != "marketing.ms.net" {
+		t.Fatalf("unexpected question-mark filter result: %+v", users)
+	}
+
+	users = um.ListUsers("sdl-*")
+	got := make([]string, 0, len(users))
+	for _, user := range users {
+		got = append(got, user.UserID)
+		if user.Domain != "ms.net" || user.CreatedAtUnix <= 0 {
+			t.Fatalf("unexpected user metadata: %+v", user)
+		}
+	}
+	want := []string{"sdl-alpha", "sdl-beta-2", "sdl-charlie"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected sorted users: got %v want %v", got, want)
+	}
+
+	if users := um.ListUsers("SDL-*"); len(users) != 0 {
+		t.Fatalf("expected case-sensitive filter, got %+v", users)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,13 @@ type UMUser struct {
 	Name      string
 	Domain    string
 	CreatedAt time.Time
+}
+
+type UMUserAdminView struct {
+	UserID        string `json:"user_id"`
+	Group         string `json:"group"`
+	Domain        string `json:"domain"`
+	CreatedAtUnix int64  `json:"created_at_unix,omitempty"`
 }
 
 type UMEnrollment struct {
@@ -190,6 +198,55 @@ func (m *UserManager) CreateUserWithID(userID string, domain string, group strin
 		return UMUser{}, err
 	}
 	return user, nil
+}
+
+func (m *UserManager) ListUsers(filter string) []UMUserAdminView {
+	filter = strings.TrimSpace(filter)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	users := make([]UMUserAdminView, 0, len(m.users))
+	for _, user := range m.users {
+		if filter != "" && !wildcardMatch(filter, user.UserID) {
+			continue
+		}
+		group := ""
+		if policy, ok := m.policies[user.UserID]; ok {
+			group = policy.GroupName
+		}
+		users = append(users, UMUserAdminView{
+			UserID:        user.UserID,
+			Group:         group,
+			Domain:        user.Domain,
+			CreatedAtUnix: user.CreatedAt.Unix(),
+		})
+	}
+	sort.Slice(users, func(i, j int) bool {
+		return users[i].UserID < users[j].UserID
+	})
+	return users
+}
+
+func wildcardMatch(pattern, value string) bool {
+	patternRunes := []rune(pattern)
+	valueRunes := []rune(value)
+	matches := make([]bool, len(valueRunes)+1)
+	matches[0] = true
+	for _, patternRune := range patternRunes {
+		next := make([]bool, len(valueRunes)+1)
+		if patternRune == '*' {
+			next[0] = matches[0]
+			for i := 1; i <= len(valueRunes); i++ {
+				next[i] = matches[i] || next[i-1]
+			}
+		} else {
+			for i := 1; i <= len(valueRunes); i++ {
+				next[i] = matches[i-1] && (patternRune == '?' || patternRune == valueRunes[i-1])
+			}
+		}
+		matches = next
+	}
+	return matches[len(valueRunes)]
 }
 
 func (m *UserManager) CreateEnrollment(userID string, ttl time.Duration) (UMEnrollment, error) {

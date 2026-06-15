@@ -33,6 +33,7 @@ type adminRequest struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	Sections     []string `json:"sections,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
+	Filter       string   `json:"filter,omitempty"`
 	Group        string   `json:"group,omitempty"`
 	DeviceID     string   `json:"device_id,omitempty"`
 	All          bool     `json:"all,omitempty"`
@@ -49,6 +50,7 @@ type adminResponse struct {
 	Ticket         string          `json:"ticket,omitempty"`
 	ExpireAtUnix   int64           `json:"expire_at_unix,omitempty"`
 	Gateways       []gatewayInfo   `json:"gateways,omitempty"`
+	Users          []userInfo      `json:"users,omitempty"`
 	Devices        []deviceInfo    `json:"devices,omitempty"`
 	UpdatedDevices []deviceInfo    `json:"updated_devices,omitempty"`
 	Domains        []string        `json:"domains,omitempty"`
@@ -69,6 +71,13 @@ type gatewayInfo struct {
 	Alive         bool     `json:"alive"`
 	Capabilities  []string `json:"capabilities,omitempty"`
 	UpdatedAtUnix int64    `json:"updated_at_unix,omitempty"`
+}
+
+type userInfo struct {
+	UserID        string `json:"user_id"`
+	Group         string `json:"group"`
+	Domain        string `json:"domain"`
+	CreatedAtUnix int64  `json:"created_at_unix,omitempty"`
 }
 
 type deviceInfo struct {
@@ -100,8 +109,8 @@ func main() {
 
 	var req adminRequest
 	switch args[0] {
-	case "createUser", "create_user":
-		req = parseCreateUser(args[1:])
+	case "user":
+		req = parseUser(args[1:])
 	case "issueDeviceTicket", "issue_device_ticket":
 		req = parseIssueDeviceTicket(args[1:])
 	case "gateway":
@@ -157,6 +166,8 @@ func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) 
 			{Key: "Name", Value: valueOrDash(resp.Name)},
 			{Key: "Domain", Value: valueOrDash(resp.Domain)},
 		})
+	case "list_users":
+		writeUserTable(stdout, resp.Users)
 	case "issue_device_ticket":
 		writeKeyValueBlock(stdout, "Issued device ticket", []kv{
 			{Key: "Ticket", Value: valueOrDash(resp.Ticket)},
@@ -214,19 +225,34 @@ func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) 
 	return nil
 }
 
-func parseCreateUser(args []string) adminRequest {
-	fs := flag.NewFlagSet("createUser", flag.ContinueOnError)
+func parseUser(args []string) adminRequest {
+	fs := flag.NewFlagSet("user", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	var create bool
+	var list bool
 	var userID string
 	var group string
+	var filter string
+	fs.BoolVar(&create, "create", false, "create a user")
+	fs.BoolVar(&list, "list", false, "list users")
 	fs.StringVar(&userID, "userId", "", "user id")
 	fs.StringVar(&userID, "u", "", "user id")
 	fs.StringVar(&group, "group", "default", "default group name")
 	fs.StringVar(&group, "g", "default", "default group name")
+	fs.StringVar(&filter, "filter", "", "user id wildcard filter")
 	if err := fs.Parse(args); err != nil {
 		fatalUsage()
 	}
-	if strings.TrimSpace(userID) == "" || fs.NArg() != 0 {
+	if fs.NArg() != 0 || create == list {
+		fatalUsage()
+	}
+	if list {
+		if strings.TrimSpace(userID) != "" || strings.TrimSpace(group) != "default" {
+			fatalUsage()
+		}
+		return adminRequest{Action: "list_users", Filter: strings.TrimSpace(filter)}
+	}
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(filter) != "" {
 		fatalUsage()
 	}
 	return adminRequest{
@@ -564,7 +590,8 @@ func call(socket string, req adminRequest) adminResponse {
 
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] createUser --userId/-u user1 [--group/-g sales.ms.net]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user --create --userId/-u user1 [--group/-g sales.ms.net]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user --list [--filter 'user-*']")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --list")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] listDevice --userId/-u u-1")
@@ -632,6 +659,26 @@ func writeGatewayTable(w io.Writer, gateways []gatewayInfo) {
 			style.boolCell(gw.Alive),
 			plainCell(formatCSV(gw.Capabilities)),
 			style.timeCell(formatUnix(gw.UpdatedAtUnix)),
+		})
+	}
+	renderTable(w, style, headers, rows)
+}
+
+func writeUserTable(w io.Writer, users []userInfo) {
+	style := newOutputStyle(w)
+	fmt.Fprintln(w, style.title(fmt.Sprintf("Users (%d)", len(users))))
+	if len(users) == 0 {
+		fmt.Fprintln(w, style.muted("  (none)"))
+		return
+	}
+	headers := []string{"USER ID", "GROUP", "DOMAIN", "CREATED AT"}
+	rows := make([][]tableCell, 0, len(users))
+	for _, user := range users {
+		rows = append(rows, []tableCell{
+			plainCell(valueOrDash(user.UserID)),
+			plainCell(valueOrDash(user.Group)),
+			plainCell(valueOrDash(user.Domain)),
+			style.timeCell(formatUnix(user.CreatedAtUnix)),
 		})
 	}
 	renderTable(w, style, headers, rows)
