@@ -229,45 +229,61 @@ func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) 
 }
 
 func parseUser(args []string) adminRequest {
-	fs := flag.NewFlagSet("user", flag.ContinueOnError)
+	if len(args) == 0 {
+		fatalUsage()
+	}
+	switch args[0] {
+	case "create":
+		return parseUserCreate(args[1:])
+	case "list":
+		return parseUserList(args[1:])
+	default:
+		fatalUsage()
+	}
+	return adminRequest{}
+}
+
+func parseUserCreate(args []string) adminRequest {
+	fs := flag.NewFlagSet("user create", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	var create bool
-	var list bool
 	var userID string
 	var group string
-	var idFilter string
-	var nameFilter string
-	fs.BoolVar(&create, "create", false, "create a user")
-	fs.BoolVar(&list, "list", false, "list users")
-	fs.StringVar(&userID, "userId", "", "user id")
+	fs.StringVar(&userID, "id", "", "user id")
 	fs.StringVar(&userID, "u", "", "user id")
 	fs.StringVar(&group, "group", "default", "default group name")
 	fs.StringVar(&group, "g", "default", "default group name")
-	fs.StringVar(&idFilter, "id", "", "user id wildcard filter")
-	fs.StringVar(&nameFilter, "name", "", "user name filter")
 	if err := fs.Parse(args); err != nil {
 		fatalUsage()
 	}
-	if fs.NArg() != 0 || create == list {
-		fatalUsage()
-	}
-	if list {
-		if strings.TrimSpace(userID) != "" || strings.TrimSpace(group) != "default" {
-			fatalUsage()
-		}
-		return adminRequest{
-			Action:     "list_users",
-			IDFilter:   strings.TrimSpace(idFilter),
-			NameFilter: strings.TrimSpace(nameFilter),
-		}
-	}
-	if strings.TrimSpace(userID) == "" || strings.TrimSpace(idFilter) != "" || strings.TrimSpace(nameFilter) != "" {
+	if fs.NArg() != 0 || strings.TrimSpace(userID) == "" {
 		fatalUsage()
 	}
 	return adminRequest{
 		Action: "create_user",
 		UserID: strings.TrimSpace(userID),
 		Group:  strings.TrimSpace(group),
+	}
+}
+
+func parseUserList(args []string) adminRequest {
+	fs := flag.NewFlagSet("user list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var idFilter string
+	var nameFilter string
+	fs.StringVar(&idFilter, "id", "", "user id wildcard filter")
+	fs.StringVar(&idFilter, "u", "", "user id wildcard filter")
+	fs.StringVar(&nameFilter, "name", "", "user name filter")
+	fs.StringVar(&nameFilter, "n", "", "user name filter")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:     "list_users",
+		IDFilter:   strings.TrimSpace(idFilter),
+		NameFilter: strings.TrimSpace(nameFilter),
 	}
 }
 
@@ -599,8 +615,8 @@ func call(socket string, req adminRequest) adminResponse {
 
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user --create --userId/-u user1 [--group/-g sales.ms.net]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user --list [--id 'user-*'] [--name huang]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user create --id/-u user1 [--group/-g sales.ms.net]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user list [--id/-u 'user-*'] [--name/-n huang]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --list")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] listDevice --userId/-u u-1")

@@ -17,14 +17,14 @@ func TestParseGatewayList(t *testing.T) {
 }
 
 func TestParseUserCreate(t *testing.T) {
-	req := parseUser([]string{"--create", "-u", "user-1", "--group", "sales"})
+	req := parseUser([]string{"create", "-u", "user-1", "--group", "sales"})
 	if req.Action != "create_user" || req.UserID != "user-1" || req.Group != "sales" {
 		t.Fatalf("unexpected create user request: %+v", req)
 	}
 }
 
 func TestParseUserListFilters(t *testing.T) {
-	req := parseUser([]string{"--list", "--id", "sdl-??-*", "--name", "huang"})
+	req := parseUser([]string{"list", "-u", "sdl-??-*", "-n", "huang"})
 	if req.Action != "list_users" || req.IDFilter != "sdl-??-*" || req.NameFilter != "huang" {
 		t.Fatalf("unexpected list users request: %+v", req)
 	}
