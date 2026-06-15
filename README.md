@@ -176,7 +176,7 @@ make proto   # 重新生成 proto Go 代码（需安装 protoc 与插件）
 如果 `sdl-www` 与 `sdl-control` 分机部署，可以额外启用内网 HTTP 管理接口：
 
 - `POST /admin/v1/create_user`
-- `GET /admin/v1/list_users?filter=sdl-*`
+- `GET /admin/v1/list_users?id=sdl-*&name=huang`
 - `POST /admin/v1/issue_auth_ticket`
 - `GET /admin/v1/list_devices?user_id=<id>`
 - `POST /admin/v1/extend_device_expiry`
@@ -195,7 +195,8 @@ Authorization: Bearer <ADMIN_HTTP_TOKEN>
 ./sdl-admin user --create --userId user1 --group sales.ms.net
 ./sdl-admin user --create -u user1
 ./sdl-admin user --list
-./sdl-admin user --list --filter 'sdl-*'
+./sdl-admin user --list --id 'sdl-*'
+./sdl-admin user --list --name huang
 ./sdl-admin issueDeviceTicket --userId <user_id>
 ./sdl-admin issueDeviceTicket -u <user_id> -g sales.ms.net
 ./sdl-admin listDevice --userId <user_id>
@@ -212,7 +213,7 @@ Authorization: Bearer <ADMIN_HTTP_TOKEN>
 ./sdl-admin stopDebugWatch --name laptop-01
 ```
 
-说明：`user --create` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。`user --list` 列出全部用户；可选的 `--filter` 对 user ID 做大小写敏感的整串通配符匹配，其中 `*` 匹配任意数量字符，`?` 匹配单个字符。`issueDeviceTicket` 里的 `--group` 可省略，默认是 `default.ms.net`；`--ttlSeconds` 也可省略，默认是 `300`。`listDevice` 现在会列出该用户下**全部已授权设备**，包括当前离线设备，并带上认证过期时间。`extendDeviceExpiry` 用于把某个设备或该用户下全部设备的认证过期时间往后顺延；不传 `--group` 时可跨组列设备，但延长单设备时如果同一个 `device_id` 命中多个组，需要补 `--group` 消歧。
+说明：`user --create` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。`user --list` 列出全部用户；数据库模式下还会关联 `sdl-www` 用户资料显示 OAuth name 和 email。`--id` 对 user ID 做大小写敏感的整串通配符匹配；`--name` 不区分大小写，无通配符时按包含关系匹配，因此 `--name huang` 可以命中 `patrick huang`。两者都支持 `*` 匹配任意数量字符、`?` 匹配单个字符，并且可以同时使用。`issueDeviceTicket` 里的 `--group` 可省略，默认是 `default.ms.net`；`--ttlSeconds` 也可省略，默认是 `300`。`listDevice` 现在会列出该用户下**全部已授权设备**，包括当前离线设备，并带上认证过期时间。`extendDeviceExpiry` 用于把某个设备或该用户下全部设备的认证过期时间往后顺延；不传 `--group` 时可跨组列设备，但延长单设备时如果同一个 `device_id` 命中多个组，需要补 `--group` 消歧。
 
 `collectDebug` 会按在线设备 `name` 定位目标节点，由 control 下发调试采集请求，节点把结构化 JSON snapshot 回传给 control，再由 `sdl-admin` 直接打印。当前实现是**同步等待返回**；成功后 control 会先把 snapshot 落盘，再把保存路径返回给 `sdl-admin`。当前支持的 section 包括：`runtime`、`gateway`、`peers`、`routes`、`nat`、`traffic`；不传 `--sections` 时默认采集全部。默认落盘目录为 `./data/debug-collect`，每个节点默认保留最近 `20` 份，同时更新同目录下的 `latest.json`。
 

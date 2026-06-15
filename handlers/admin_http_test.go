@@ -45,7 +45,7 @@ func TestAdminHTTPListDevices(t *testing.T) {
 	}
 }
 
-func TestAdminHTTPListUsersWithFilter(t *testing.T) {
+func TestAdminHTTPListUsersWithIDFilter(t *testing.T) {
 	ctrl := newTestController(t)
 	for _, userID := range []string{"sdl-alpha", "sdl-beta", "admin-1"} {
 		if _, err := ctrl.UMCreateUserWithID(userID, "sales", "ms.net"); err != nil {
@@ -53,7 +53,7 @@ func TestAdminHTTPListUsersWithFilter(t *testing.T) {
 		}
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/admin/v1/list_users?filter=sdl-%3Feta", nil)
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/list_users?id=sdl-%3Feta", nil)
 	rec := httptest.NewRecorder()
 	adminHTTPHandler(ctrl).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

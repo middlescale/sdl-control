@@ -21,6 +21,8 @@ type UMUser struct {
 
 type UMUserAdminView struct {
 	UserID        string `json:"user_id"`
+	Name          string `json:"name,omitempty"`
+	Email         string `json:"email,omitempty"`
 	Group         string `json:"group"`
 	Domain        string `json:"domain"`
 	CreatedAtUnix int64  `json:"created_at_unix,omitempty"`
@@ -200,14 +202,14 @@ func (m *UserManager) CreateUserWithID(userID string, domain string, group strin
 	return user, nil
 }
 
-func (m *UserManager) ListUsers(filter string) []UMUserAdminView {
-	filter = strings.TrimSpace(filter)
+func (m *UserManager) ListUsers(idFilter string) []UMUserAdminView {
+	idFilter = strings.TrimSpace(idFilter)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	users := make([]UMUserAdminView, 0, len(m.users))
 	for _, user := range m.users {
-		if filter != "" && !wildcardMatch(filter, user.UserID) {
+		if idFilter != "" && !wildcardMatch(idFilter, user.UserID) {
 			continue
 		}
 		group := ""
@@ -216,6 +218,7 @@ func (m *UserManager) ListUsers(filter string) []UMUserAdminView {
 		}
 		users = append(users, UMUserAdminView{
 			UserID:        user.UserID,
+			Name:          user.Name,
 			Group:         group,
 			Domain:        user.Domain,
 			CreatedAtUnix: user.CreatedAt.Unix(),
@@ -247,6 +250,18 @@ func wildcardMatch(pattern, value string) bool {
 		matches = next
 	}
 	return matches[len(valueRunes)]
+}
+
+func userNameMatches(nameFilter, name string) bool {
+	nameFilter = strings.ToLower(strings.TrimSpace(nameFilter))
+	name = strings.ToLower(strings.TrimSpace(name))
+	if nameFilter == "" {
+		return true
+	}
+	if strings.ContainsAny(nameFilter, "*?") {
+		return wildcardMatch(nameFilter, name)
+	}
+	return strings.Contains(name, nameFilter)
 }
 
 func (m *UserManager) CreateEnrollment(userID string, ttl time.Duration) (UMEnrollment, error) {

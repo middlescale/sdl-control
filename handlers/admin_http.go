@@ -91,7 +91,8 @@ func adminRequestFromHTTP(r *http.Request) (adminRequest, error) {
 	if r.Method == http.MethodGet {
 		q := r.URL.Query()
 		req.UserID = q.Get("user_id")
-		req.Filter = q.Get("filter")
+		req.IDFilter = q.Get("id")
+		req.NameFilter = q.Get("name")
 		req.Group = q.Get("group")
 		req.DeviceID = q.Get("device_id")
 		req.Domain = q.Get("domain")

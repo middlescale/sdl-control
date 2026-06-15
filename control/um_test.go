@@ -166,7 +166,7 @@ func TestListUsersFiltersByUserIDWildcardAndSorts(t *testing.T) {
 	}
 
 	users := um.ListUsers("sdl-?lpha")
-	if len(users) != 1 || users[0].UserID != "sdl-alpha" || users[0].Group != "marketing.ms.net" {
+	if len(users) != 1 || users[0].UserID != "sdl-alpha" || users[0].Name != "sdl-alpha" || users[0].Group != "marketing.ms.net" {
 		t.Fatalf("unexpected question-mark filter result: %+v", users)
 	}
 
@@ -185,6 +185,24 @@ func TestListUsersFiltersByUserIDWildcardAndSorts(t *testing.T) {
 
 	if users := um.ListUsers("SDL-*"); len(users) != 0 {
 		t.Fatalf("expected case-sensitive filter, got %+v", users)
+	}
+}
+
+func TestUserNameMatchesContainsAndWildcardCaseInsensitive(t *testing.T) {
+	for _, tc := range []struct {
+		filter string
+		name   string
+		want   bool
+	}{
+		{filter: "huang", name: "patrick huang", want: true},
+		{filter: "HUANG", name: "patrick huang", want: true},
+		{filter: "pat*huang", name: "Patrick Huang", want: true},
+		{filter: "patrick ?uang", name: "Patrick Huang", want: true},
+		{filter: "alice", name: "Patrick Huang", want: false},
+	} {
+		if got := userNameMatches(tc.filter, tc.name); got != tc.want {
+			t.Fatalf("userNameMatches(%q, %q) = %v, want %v", tc.filter, tc.name, got, tc.want)
+		}
 	}
 }
 

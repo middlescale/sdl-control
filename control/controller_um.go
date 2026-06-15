@@ -2,6 +2,7 @@ package control
 
 import (
 	"fmt"
+	"sdl-control/control/store"
 	"strings"
 	"time"
 )
@@ -54,8 +55,38 @@ func (c *Controller) UMCreateUserWithID(userID string, group string, domain ...s
 	return c.um.CreateUserWithID(userID, selectedDomain, group)
 }
 
-func (c *Controller) UMListUsers(filter string) []UMUserAdminView {
-	return c.um.ListUsers(filter)
+func (c *Controller) UMListUsers(idFilter, nameFilter string) ([]UMUserAdminView, error) {
+	users := c.um.ListUsers(idFilter)
+	if c.pgStore != nil {
+		profiles, err := c.pgStore.ListWebUserProfiles()
+		if err != nil {
+			return nil, err
+		}
+		profileByUserID := make(map[string]store.WebUserProfile, len(profiles))
+		for _, profile := range profiles {
+			profileByUserID[strings.TrimSpace(profile.SDLUserID)] = profile
+		}
+		for i := range users {
+			profile, ok := profileByUserID[users[i].UserID]
+			if !ok {
+				continue
+			}
+			users[i].Email = strings.TrimSpace(profile.Email)
+			if name := strings.TrimSpace(profile.DisplayName); name != "" {
+				users[i].Name = name
+			}
+		}
+	}
+	if strings.TrimSpace(nameFilter) == "" {
+		return users, nil
+	}
+	filtered := make([]UMUserAdminView, 0, len(users))
+	for _, user := range users {
+		if userNameMatches(nameFilter, user.Name) {
+			filtered = append(filtered, user)
+		}
+	}
+	return filtered, nil
 }
 
 func (c *Controller) UMCreateEnrollment(userID string, ttl time.Duration) (UMEnrollment, error) {

@@ -23,9 +23,9 @@ func TestParseUserCreate(t *testing.T) {
 	}
 }
 
-func TestParseUserListFilter(t *testing.T) {
-	req := parseUser([]string{"--list", "--filter", "sdl-??-*"})
-	if req.Action != "list_users" || req.Filter != "sdl-??-*" {
+func TestParseUserListFilters(t *testing.T) {
+	req := parseUser([]string{"--list", "--id", "sdl-??-*", "--name", "huang"})
+	if req.Action != "list_users" || req.IDFilter != "sdl-??-*" || req.NameFilter != "huang" {
 		t.Fatalf("unexpected list users request: %+v", req)
 	}
 }
@@ -96,6 +96,8 @@ func TestWriteResponseListUsers(t *testing.T) {
 		OK: true,
 		Users: []userInfo{{
 			UserID:        "sdl-user-1",
+			Name:          "Example User",
+			Email:         "user@example.com",
 			Group:         "user.ms.net",
 			Domain:        "ms.net",
 			CreatedAtUnix: 1_750_000_000,
@@ -105,7 +107,7 @@ func TestWriteResponseListUsers(t *testing.T) {
 		t.Fatalf("writeResponse failed: %v", err)
 	}
 	out := stdout.String()
-	for _, want := range []string{"Users (1)", "USER ID", "GROUP", "DOMAIN", "sdl-user-1", "user.ms.net", "ms.net"} {
+	for _, want := range []string{"Users (1)", "USER ID", "NAME", "EMAIL", "GROUP", "DOMAIN", "sdl-user-1", "Example User", "user@example.com", "user.ms.net", "ms.net"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
 		}

@@ -85,7 +85,7 @@ The `sdl-admin` tool provides administrative functionality through a Unix Domain
 ```bash
 ./sdl-admin user --create --userId user1 --group sales.ms.net
 ./sdl-admin user --create -u user1
-./sdl-admin user --list [--filter 'user-*']
+./sdl-admin user --list [--id 'user-*'] [--name huang]
 ./sdl-admin issueDeviceTicket --userId <user_id>
 ./sdl-admin issueDeviceTicket -u <user_id> -g sales.ms.net
 ./sdl-admin gateway --list

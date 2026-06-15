@@ -33,7 +33,8 @@ type adminRequest struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	Sections     []string `json:"sections,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
-	Filter       string   `json:"filter,omitempty"`
+	IDFilter     string   `json:"id_filter,omitempty"`
+	NameFilter   string   `json:"name_filter,omitempty"`
 	Group        string   `json:"group,omitempty"`
 	DeviceID     string   `json:"device_id,omitempty"`
 	All          bool     `json:"all,omitempty"`
@@ -75,6 +76,8 @@ type gatewayInfo struct {
 
 type userInfo struct {
 	UserID        string `json:"user_id"`
+	Name          string `json:"name,omitempty"`
+	Email         string `json:"email,omitempty"`
 	Group         string `json:"group"`
 	Domain        string `json:"domain"`
 	CreatedAtUnix int64  `json:"created_at_unix,omitempty"`
@@ -232,14 +235,16 @@ func parseUser(args []string) adminRequest {
 	var list bool
 	var userID string
 	var group string
-	var filter string
+	var idFilter string
+	var nameFilter string
 	fs.BoolVar(&create, "create", false, "create a user")
 	fs.BoolVar(&list, "list", false, "list users")
 	fs.StringVar(&userID, "userId", "", "user id")
 	fs.StringVar(&userID, "u", "", "user id")
 	fs.StringVar(&group, "group", "default", "default group name")
 	fs.StringVar(&group, "g", "default", "default group name")
-	fs.StringVar(&filter, "filter", "", "user id wildcard filter")
+	fs.StringVar(&idFilter, "id", "", "user id wildcard filter")
+	fs.StringVar(&nameFilter, "name", "", "user name filter")
 	if err := fs.Parse(args); err != nil {
 		fatalUsage()
 	}
@@ -250,9 +255,13 @@ func parseUser(args []string) adminRequest {
 		if strings.TrimSpace(userID) != "" || strings.TrimSpace(group) != "default" {
 			fatalUsage()
 		}
-		return adminRequest{Action: "list_users", Filter: strings.TrimSpace(filter)}
+		return adminRequest{
+			Action:     "list_users",
+			IDFilter:   strings.TrimSpace(idFilter),
+			NameFilter: strings.TrimSpace(nameFilter),
+		}
 	}
-	if strings.TrimSpace(userID) == "" || strings.TrimSpace(filter) != "" {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(idFilter) != "" || strings.TrimSpace(nameFilter) != "" {
 		fatalUsage()
 	}
 	return adminRequest{
@@ -591,7 +600,7 @@ func call(socket string, req adminRequest) adminResponse {
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user --create --userId/-u user1 [--group/-g sales.ms.net]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user --list [--filter 'user-*']")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user --list [--id 'user-*'] [--name huang]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --list")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] listDevice --userId/-u u-1")
@@ -671,11 +680,13 @@ func writeUserTable(w io.Writer, users []userInfo) {
 		fmt.Fprintln(w, style.muted("  (none)"))
 		return
 	}
-	headers := []string{"USER ID", "GROUP", "DOMAIN", "CREATED AT"}
+	headers := []string{"USER ID", "NAME", "EMAIL", "GROUP", "DOMAIN", "CREATED AT"}
 	rows := make([][]tableCell, 0, len(users))
 	for _, user := range users {
 		rows = append(rows, []tableCell{
 			plainCell(valueOrDash(user.UserID)),
+			plainCell(valueOrDash(user.Name)),
+			plainCell(valueOrDash(user.Email)),
 			plainCell(valueOrDash(user.Group)),
 			plainCell(valueOrDash(user.Domain)),
 			style.timeCell(formatUnix(user.CreatedAtUnix)),

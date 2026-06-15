@@ -15,7 +15,8 @@ type adminRequest struct {
 	Capabilities []string `json:"capabilities,omitempty"`
 	Sections     []string `json:"sections,omitempty"`
 	UserID       string   `json:"user_id,omitempty"`
-	Filter       string   `json:"filter,omitempty"`
+	IDFilter     string   `json:"id_filter,omitempty"`
+	NameFilter   string   `json:"name_filter,omitempty"`
 	Group        string   `json:"group,omitempty"`
 	DeviceID     string   `json:"device_id,omitempty"`
 	All          bool     `json:"all,omitempty"`
