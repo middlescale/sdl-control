@@ -86,8 +86,9 @@ The `sdl-admin` tool provides administrative functionality through a Unix Domain
 ./sdl-admin user create --id user1 --group sales.ms.net
 ./sdl-admin user create -u user1
 ./sdl-admin user list [--id/-u 'user-*'] [--name/-n huang]
-./sdl-admin issueDeviceTicket --userId <user_id>
-./sdl-admin issueDeviceTicket -u <user_id> -g sales.ms.net
+./sdl-admin device list --id/-u <user_id>
+./sdl-admin device issue-auth-ticket --id/-u <user_id> --group/-g sales.ms.net
+./sdl-admin device extend-expiry --id/-u <user_id> --device-id/-d <device_id>
 ./sdl-admin gateway --list
 ./sdl-admin gateway --enlist gw-1
 ./sdl-admin gateway --delist gw-1

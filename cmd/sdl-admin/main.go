@@ -114,14 +114,10 @@ func main() {
 	switch args[0] {
 	case "user":
 		req = parseUser(args[1:])
-	case "issueDeviceTicket", "issue_device_ticket":
-		req = parseIssueDeviceTicket(args[1:])
+	case "device":
+		req = parseDevice(args[1:])
 	case "gateway":
 		req = parseGateway(args[1:])
-	case "listDevice", "list_device":
-		req = parseListDevice(args[1:])
-	case "extendDeviceExpiry", "extend_device_expiry":
-		req = parseExtendDeviceExpiry(args[1:])
 	case "approveDeviceRename", "approve_device_rename":
 		req = parseApproveDeviceRename(args[1:])
 	case "renameDevice", "rename_device":
@@ -287,17 +283,34 @@ func parseUserList(args []string) adminRequest {
 	}
 }
 
-func parseIssueDeviceTicket(args []string) adminRequest {
-	fs := flag.NewFlagSet("issueDeviceTicket", flag.ContinueOnError)
+func parseDevice(args []string) adminRequest {
+	if len(args) == 0 {
+		fatalUsage()
+	}
+	switch args[0] {
+	case "list":
+		return parseDeviceList(args[1:])
+	case "issue-auth-ticket":
+		return parseDeviceIssueAuthTicket(args[1:])
+	case "extend-expiry":
+		return parseDeviceExtendExpiry(args[1:])
+	default:
+		fatalUsage()
+	}
+	return adminRequest{}
+}
+
+func parseDeviceIssueAuthTicket(args []string) adminRequest {
+	fs := flag.NewFlagSet("device issue-auth-ticket", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var userID string
 	var group string
 	var ttlSeconds int64
-	fs.StringVar(&userID, "userId", "", "user id")
+	fs.StringVar(&userID, "id", "", "user id")
 	fs.StringVar(&userID, "u", "", "user id")
 	fs.StringVar(&group, "group", "default.ms.net", "group name")
 	fs.StringVar(&group, "g", "default.ms.net", "group name")
-	fs.Int64Var(&ttlSeconds, "ttlSeconds", 300, "ticket ttl seconds")
+	fs.Int64Var(&ttlSeconds, "ttl-seconds", 300, "ticket ttl seconds")
 	fs.Int64Var(&ttlSeconds, "t", 300, "ticket ttl seconds")
 	if err := fs.Parse(args); err != nil {
 		fatalUsage()
@@ -313,11 +326,11 @@ func parseIssueDeviceTicket(args []string) adminRequest {
 	}
 }
 
-func parseListDevice(args []string) adminRequest {
-	fs := flag.NewFlagSet("listDevice", flag.ContinueOnError)
+func parseDeviceList(args []string) adminRequest {
+	fs := flag.NewFlagSet("device list", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var userID string
-	fs.StringVar(&userID, "userId", "", "user id")
+	fs.StringVar(&userID, "id", "", "user id")
 	fs.StringVar(&userID, "u", "", "user id")
 	if err := fs.Parse(args); err != nil {
 		fatalUsage()
@@ -328,22 +341,22 @@ func parseListDevice(args []string) adminRequest {
 	return adminRequest{Action: "list_device", UserID: strings.TrimSpace(userID)}
 }
 
-func parseExtendDeviceExpiry(args []string) adminRequest {
-	fs := flag.NewFlagSet("extendDeviceExpiry", flag.ContinueOnError)
+func parseDeviceExtendExpiry(args []string) adminRequest {
+	fs := flag.NewFlagSet("device extend-expiry", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var userID string
 	var group string
 	var deviceID string
 	var all bool
 	var ttlSeconds int64
-	fs.StringVar(&userID, "userId", "", "user id")
+	fs.StringVar(&userID, "id", "", "user id")
 	fs.StringVar(&userID, "u", "", "user id")
 	fs.StringVar(&group, "group", "", "optional group filter")
 	fs.StringVar(&group, "g", "", "optional group filter")
-	fs.StringVar(&deviceID, "deviceId", "", "device id")
+	fs.StringVar(&deviceID, "device-id", "", "device id")
 	fs.StringVar(&deviceID, "d", "", "device id")
 	fs.BoolVar(&all, "all", false, "extend all devices under the user")
-	fs.Int64Var(&ttlSeconds, "ttlSeconds", int64((30 * 24 * time.Hour).Seconds()), "seconds to extend")
+	fs.Int64Var(&ttlSeconds, "ttl-seconds", int64((30 * 24 * time.Hour).Seconds()), "seconds to extend")
 	fs.Int64Var(&ttlSeconds, "t", int64((30 * 24 * time.Hour).Seconds()), "seconds to extend")
 	if err := fs.Parse(args); err != nil {
 		fatalUsage()
@@ -617,10 +630,10 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user create --id/-u user1 [--group/-g sales.ms.net]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user list [--id/-u 'user-*'] [--name/-n huang]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] issueDeviceTicket --userId/-u u-1 [--group/-g default.ms.net] [--ttlSeconds/-t 300]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device list --id/-u u-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device issue-auth-ticket --id/-u u-1 [--group/-g default.ms.net] [--ttl-seconds/-t 300]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device extend-expiry --id/-u u-1 (--device-id/-d dev-1 | --all) [--group/-g sales.ms.net] [--ttl-seconds/-t 2592000]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --list")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] listDevice --userId/-u u-1")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] extendDeviceExpiry --userId/-u u-1 (--deviceId/-d dev-1 | --all) [--group/-g sales.ms.net] [--ttlSeconds/-t 2592000]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] approveDeviceRename --deviceId/-d dev-1 [--group/-g sales.ms.net] [--userId/-u u-1]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] renameDevice --deviceId/-d dev-1 --name/-n new-name [--group/-g sales.ms.net] [--userId/-u u-1]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --enlist gw-1")

@@ -30,6 +30,34 @@ func TestParseUserListFilters(t *testing.T) {
 	}
 }
 
+func TestParseDeviceList(t *testing.T) {
+	req := parseDevice([]string{"list", "-u", "user-1"})
+	if req.Action != "list_device" || req.UserID != "user-1" {
+		t.Fatalf("unexpected device list request: %+v", req)
+	}
+}
+
+func TestParseDeviceIssueAuthTicket(t *testing.T) {
+	req := parseDevice([]string{"issue-auth-ticket", "--id", "user-1", "--group", "sales", "--ttl-seconds", "600"})
+	if req.Action != "issue_device_ticket" || req.UserID != "user-1" || req.Group != "sales" || req.TTLSeconds != 600 {
+		t.Fatalf("unexpected issue auth ticket request: %+v", req)
+	}
+}
+
+func TestParseDeviceExtendExpiry(t *testing.T) {
+	req := parseDevice([]string{"extend-expiry", "-u", "user-1", "--device-id", "dev-1", "-t", "3600"})
+	if req.Action != "extend_device_expiry" || req.UserID != "user-1" || req.DeviceID != "dev-1" || req.All || req.TTLSeconds != 3600 {
+		t.Fatalf("unexpected extend expiry request: %+v", req)
+	}
+}
+
+func TestParseDeviceExtendExpiryAll(t *testing.T) {
+	req := parseDevice([]string{"extend-expiry", "--id", "user-1", "--all"})
+	if req.Action != "extend_device_expiry" || req.UserID != "user-1" || !req.All || req.DeviceID != "" {
+		t.Fatalf("unexpected extend all expiry request: %+v", req)
+	}
+}
+
 func TestParseGatewayEnlist(t *testing.T) {
 	req := parseGateway([]string{"--enlist", "gw-1"})
 	if req.Action != "gateway_enlist" {
