@@ -261,7 +261,7 @@ func TestRegistrationWithExplicitCapabilitiesAllowsSessionScopedHandshakeState(t
 	regReq := newBaseRegisterReq("dev-cap-host-fallback", "node-cap-host-fallback")
 	ensureAuthed(t, ctrl, regReq.GetToken(), regReq.GetDeviceId(), regReq.GetDevicePubKey())
 	registrationRemote := &net.UDPAddr{IP: net.ParseIP("1.1.1.12"), Port: 1113}
-	if _, _, err := ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(
+	if _, _, _, err := ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(
 		newRegistrationPacket(t, regReq),
 		registrationRemote,
 		[]string{capabilityUDPEndpointReportV1, "punch_coord_v1"},
@@ -1378,6 +1378,128 @@ func TestListDevicesIncludesOnlineState(t *testing.T) {
 	}
 }
 
+func TestPersonalSDLUsersInSameGroupAreIsolated(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain:             "ms.net",
+		DefaultGatewayID:          "gw-default",
+		GatewayTicketSecret:       testGatewayTicketSecret,
+		DNSServiceAddr:            "127.0.0.1:53",
+		DebugCollectKeepPerDevice: 20,
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"user": {
+						Gateway: net.ParseIP("10.26.0.1"),
+						Netmask: "255.255.255.0",
+					},
+				},
+			},
+		},
+	})
+	defer ctrl.Stop()
+
+	authPersonalDevice := func(userID, deviceID string, pubKey []byte) {
+		t.Helper()
+		user, err := ctrl.UMCreateUserWithID(userID, "user.ms.net", "ms.net")
+		if err != nil {
+			t.Fatalf("UMCreateUserWithID %s failed: %v", userID, err)
+		}
+		ticket, err := ctrl.UMIssueDeviceTicket(user.UserID, "user.ms.net", time.Minute)
+		if err != nil {
+			t.Fatalf("UMIssueDeviceTicket %s failed: %v", userID, err)
+		}
+		if _, err := ctrl.UMAuthDevice(user.UserID, "user.ms.net", deviceID, ticket.Ticket, pubKey); err != nil {
+			t.Fatalf("UMAuthDevice %s/%s failed: %v", userID, deviceID, err)
+		}
+	}
+
+	reqA := newBaseRegisterReq("dev-personal-a", "node-a")
+	reqA.Token = "user.ms.net"
+	authPersonalDevice("sdl-alpha", reqA.GetDeviceId(), reqA.GetDevicePubKey())
+	respA := mustRegister(t, ctrl, reqA, &net.UDPAddr{IP: net.ParseIP("1.1.1.10"), Port: 1010})
+	alphaNetworkKey := NewNetworkIdentity("user.ms.net", "sdl-alpha").Key()
+
+	reqB := newBaseRegisterReq("dev-personal-b", "node-b")
+	reqB.Token = "user.ms.net"
+	authPersonalDevice("sdl-beta", reqB.GetDeviceId(), reqB.GetDevicePubKey())
+	respB := mustRegister(t, ctrl, reqB, &net.UDPAddr{IP: net.ParseIP("1.1.1.11"), Port: 1111})
+	betaNetworkKey := NewNetworkIdentity("user.ms.net", "sdl-beta").Key()
+
+	if respA.GetVirtualIp() != respB.GetVirtualIp() {
+		t.Fatalf("personal users should be able to reuse isolated virtual ip, got %s and %s", util.Uint32ToIP(respA.GetVirtualIp()), util.Uint32ToIP(respB.GetVirtualIp()))
+	}
+	if len(respA.GetDeviceInfoList()) != 0 {
+		t.Fatalf("sdl-alpha should not see sdl-beta at registration: %+v", respA.GetDeviceInfoList())
+	}
+	if len(respB.GetDeviceInfoList()) != 0 {
+		t.Fatalf("sdl-beta should not see sdl-alpha at registration: %+v", respB.GetDeviceInfoList())
+	}
+
+	betaStatus := &pb.ClientStatusInfo{
+		Source:  respB.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		P2PList: []*pb.RouteItem{
+			{NextIp: respB.GetVirtualGateway()},
+		},
+	}
+	betaStatusPayload, err := proto.Marshal(betaStatus)
+	if err != nil {
+		t.Fatalf("marshal beta status failed: %v", err)
+	}
+	if _, err := ctrl.HandleClientStatusInfoPacketInNetwork(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoClientStatusInfo,
+		SrcIP:    util.Uint32ToIP(respB.GetVirtualIp()),
+		Payload:  betaStatusPayload,
+	}, betaNetworkKey); err != nil {
+		t.Fatalf("HandleClientStatusInfoPacketInNetwork beta failed: %v", err)
+	}
+	alphaClient, ok := ctrl.nc.FindClientByVirtualIPInNetwork(alphaNetworkKey, respA.GetVirtualIp())
+	if !ok {
+		t.Fatalf("alpha client not found")
+	}
+	betaClient, ok := ctrl.nc.FindClientByVirtualIPInNetwork(betaNetworkKey, respB.GetVirtualIp())
+	if !ok {
+		t.Fatalf("beta client not found")
+	}
+	if alphaClient.DataPlaneReachable || betaClient.DataPlaneReachable != true {
+		t.Fatalf("status update crossed personal network: alpha=%+v beta=%+v", alphaClient, betaClient)
+	}
+
+	listPacket, err := ctrl.HandlePullDeviceListPacketInNetwork(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPullDeviceList,
+		SrcIP:    util.Uint32ToIP(respB.GetVirtualIp()),
+		DstIP:    net.ParseIP("0.0.0.1"),
+	}, betaNetworkKey)
+	if err != nil {
+		t.Fatalf("HandlePullDeviceListPacket failed: %v", err)
+	}
+	var pulled pb.DeviceList
+	if err := proto.Unmarshal(listPacket.Payload, &pulled); err != nil {
+		t.Fatalf("unmarshal pulled device list failed: %v", err)
+	}
+	if len(pulled.GetDeviceInfoList()) != 0 {
+		t.Fatalf("sdl-beta should not pull sdl-alpha device list: %+v", pulled.GetDeviceInfoList())
+	}
+
+	devices := ctrl.ListDevices("sdl-alpha")
+	if len(devices) != 1 {
+		t.Fatalf("expected one listed device for sdl-alpha, got %+v", devices)
+	}
+	if devices[0].Group != "user.ms.net" || devices[0].VirtualIP != util.Uint32ToIP(respA.GetVirtualIp()).String() {
+		t.Fatalf("unexpected sdl-alpha device view: %+v", devices[0])
+	}
+
+	snapshot, err := ctrl.BuildDNSSnapshot("ms.net", "user")
+	if err != nil {
+		t.Fatalf("BuildDNSSnapshot failed: %v", err)
+	}
+	if len(snapshot.Records) != 0 {
+		t.Fatalf("personal user records must not be exposed through shared DNS snapshot: %+v", snapshot.Records)
+	}
+}
+
 func TestListDevicesIncludesOfflineAuthedDevices(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -1649,87 +1771,82 @@ func TestHandleDeviceRenamePacket(t *testing.T) {
 	if record.DisplayName != "renamed-node" {
 		t.Fatalf("unexpected persisted display name after rename request: %+v", record)
 	}
-	if _, err := ctrl.findPendingDeviceRename("dev-b", "", "ms.net"); err == nil {
-		t.Fatalf("pending rename should not exist after client rename request")
-	}
 }
 
-func TestApprovePendingDeviceRename(t *testing.T) {
+func TestHandleDeviceRenamePacketRejectsDuplicateName(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
-	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
 	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
 
-	ctrl.queuePendingDeviceRename(PendingDeviceRename{
-		RequestID:       7,
-		SourceVirtualIP: resp2.GetVirtualIp(),
-		UserID:          "u-1",
-		Group:           "ms.net",
-		DeviceID:        "dev-b",
-		RequestedName:   "renamed-node",
-	})
-
-	appliedName, changedIP, err := ctrl.ApprovePendingDeviceRename("dev-b", "", "ms.net")
+	req := &pb.DeviceRenameRequest{
+		RequestId: 8,
+		DeviceId:  "dev-b",
+		NewName:   " NODE-A ",
+	}
+	payload, err := proto.Marshal(req)
 	if err != nil {
-		t.Fatalf("ApprovePendingDeviceRename failed: %v", err)
+		t.Fatalf("marshal rename request failed: %v", err)
 	}
-	if appliedName != "renamed-node" || changedIP != resp2.GetVirtualIp() {
-		t.Fatalf("unexpected approve result: name=%q ip=%d", appliedName, changedIP)
+	packet := &protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoDeviceRenameRequest,
+		SrcIP:    util.Uint32ToIP(resp2.GetVirtualIp()),
+		DstIP:    net.ParseIP("0.0.0.1"),
+		Payload:  payload,
 	}
-
-	client, ok := ctrl.nc.FindClientByVirtualIP(resp2.GetVirtualIp())
-	if !ok || client.Name != "renamed-node" {
-		t.Fatalf("unexpected client after approve: %+v %t", client, ok)
+	respPacket, _, err := ctrl.HandleDeviceRenamePacket(packet)
+	if err != nil {
+		t.Fatalf("HandleDeviceRenamePacket failed: %v", err)
+	}
+	var ack pb.DeviceRenameResponse
+	if err := proto.Unmarshal(respPacket.Payload, &ack); err != nil {
+		t.Fatalf("unmarshal rename response failed: %v", err)
+	}
+	if ack.GetOk() || ack.GetReason() != "device name already exists" {
+		t.Fatalf("expected duplicate-name rejection, got %+v", ack)
 	}
 	record, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-b")
-	if !ok || record.DisplayName != "renamed-node" {
-		t.Fatalf("unexpected UM record after approve: %+v %t", record, ok)
+	if !ok {
+		t.Fatalf("authed device not found after rename")
 	}
-	if _, err := ctrl.findPendingDeviceRename("dev-b", "", "ms.net"); err == nil {
-		t.Fatalf("pending rename should be cleared after approve")
-	}
-
-	packets, err := ctrl.BuildPushDeviceListPacketsForPeerChange(changedIP)
-	if err != nil {
-		t.Fatalf("BuildPushDeviceListPacketsForPeerChange failed: %v", err)
-	}
-	if len(packets) != 1 {
-		t.Fatalf("expected 1 push packet after rename approve, got %d", len(packets))
-	}
-	if !packets[0].DstIP.Equal(util.Uint32ToIP(resp1.GetVirtualIp())) {
-		t.Fatalf("unexpected push target after rename approve: %v", packets[0].DstIP)
-	}
-	var list pb.DeviceList
-	if err := proto.Unmarshal(packets[0].Payload, &list); err != nil {
-		t.Fatalf("unmarshal device list failed: %v", err)
-	}
-	if len(list.GetDeviceInfoList()) != 1 || list.GetDeviceInfoList()[0].GetName() != "renamed-node" {
-		t.Fatalf("unexpected pushed device list after rename approve: %+v", list.GetDeviceInfoList())
+	if record.DisplayName != "" {
+		t.Fatalf("duplicate rename should not persist display name: %+v", record)
 	}
 }
 
-func TestRenameDeviceByAdmin(t *testing.T) {
+func TestPersonalUsersCanShareDeviceDisplayName(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
 
-	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
-
-	appliedName, changedIP, err := ctrl.RenameDeviceByAdmin("dev-b", "", "ms.net", "admin-node")
+	userA, err := ctrl.UMCreateUserWithID("sdl-alpha", "user.ms.net", "ms.net")
 	if err != nil {
-		t.Fatalf("RenameDeviceByAdmin failed: %v", err)
+		t.Fatalf("UMCreateUserWithID sdl-alpha failed: %v", err)
 	}
-	if appliedName != "admin-node" || changedIP != resp.GetVirtualIp() {
-		t.Fatalf("unexpected admin rename result: name=%q ip=%d", appliedName, changedIP)
+	userB, err := ctrl.UMCreateUserWithID("sdl-beta", "user.ms.net", "ms.net")
+	if err != nil {
+		t.Fatalf("UMCreateUserWithID sdl-beta failed: %v", err)
 	}
-
-	client, ok := ctrl.nc.FindClientByVirtualIP(resp.GetVirtualIp())
-	if !ok || client.Name != "admin-node" {
-		t.Fatalf("unexpected client after admin rename: %+v %t", client, ok)
+	ticketA, err := ctrl.UMIssueDeviceTicket(userA.UserID, "user.ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket sdl-alpha failed: %v", err)
 	}
-	record, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-b")
-	if !ok || record.DisplayName != "admin-node" {
-		t.Fatalf("unexpected UM record after admin rename: %+v %t", record, ok)
+	ticketB, err := ctrl.UMIssueDeviceTicket(userB.UserID, "user.ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket sdl-beta failed: %v", err)
+	}
+	if _, err := ctrl.UMAuthDevice(userA.UserID, "user.ms.net", "dev-a", ticketA.Ticket, []byte("pk-dev-a")); err != nil {
+		t.Fatalf("UMAuthDevice sdl-alpha failed: %v", err)
+	}
+	if _, err := ctrl.UMAuthDevice(userB.UserID, "user.ms.net", "dev-b", ticketB.Ticket, []byte("pk-dev-b")); err != nil {
+		t.Fatalf("UMAuthDevice sdl-beta failed: %v", err)
+	}
+	if err := ctrl.UMSetAuthedDeviceDisplayName("user.ms.net", "dev-a", "macbook"); err != nil {
+		t.Fatalf("UMSetAuthedDeviceDisplayName dev-a failed: %v", err)
+	}
+	if err := ctrl.UMSetAuthedDeviceDisplayName("user.ms.net", "dev-b", "MACBOOK"); err != nil {
+		t.Fatalf("personal users should be allowed to share display names: %v", err)
 	}
 }
 
@@ -2667,7 +2784,8 @@ func TestStaleGatewayIsRetainedForExistingClientButNotAssignedToNewClient(t *tes
 	ctrl.gatewayNodes["jp-1"] = node
 	ctrl.gatewayMu.Unlock()
 
-	existingGrants, _ := ctrl.buildGatewayAccessGrantsForExistingClient(firstResp.GetVirtualIp(), firstReq.GetDeviceId())
+	firstNetworkKey := NewNetworkIdentity(firstReq.GetToken(), "").Key()
+	existingGrants, _ := ctrl.buildGatewayAccessGrantsForExistingClient(firstNetworkKey, firstResp.GetVirtualIp(), firstReq.GetDeviceId())
 	if len(existingGrants) != 2 {
 		t.Fatalf("expected existing client to retain stale gateway grant, got %d grants", len(existingGrants))
 	}
@@ -2684,6 +2802,7 @@ func TestStaleGatewayIsRetainedForExistingClientButNotAssignedToNewClient(t *tes
 		t.Fatalf("expected stale gateway session %d to be retained, got %d", staleSessionID, retainedSessionID)
 	}
 	refreshedGrants, _, _ := ctrl.buildGatewayAccessGrantsForRefresh(
+		firstNetworkKey,
 		firstResp.GetVirtualIp(),
 		firstReq.GetDeviceId(),
 		staleSessionID,
@@ -2770,7 +2889,7 @@ func TestDelistRemovesRetainedStaleGatewayGrant(t *testing.T) {
 	if err := ctrl.DelistGatewayNodeByID("jp-1"); err != nil {
 		t.Fatalf("DelistGatewayNodeByID failed: %v", err)
 	}
-	grants, _ := ctrl.buildGatewayAccessGrantsForExistingClient(regResp.GetVirtualIp(), regReq.GetDeviceId())
+	grants, _ := ctrl.buildGatewayAccessGrantsForExistingClient(NewNetworkIdentity(regReq.GetToken(), "").Key(), regResp.GetVirtualIp(), regReq.GetDeviceId())
 	if len(grants) != 1 || grants[0].GetGatewayId() != "gw-default" {
 		t.Fatalf("expected delist to revoke stale gateway grant, got %+v", grants)
 	}
@@ -3133,7 +3252,7 @@ func TestGatewayGrantCachePrunesRemovedGateways(t *testing.T) {
 	delete(ctrl.gatewayNodes, "gw-default")
 	ctrl.gatewayMu.Unlock()
 
-	if grants := ctrl.buildGatewayAccessGrants(regResp.GetVirtualIp(), regReq.GetDeviceId()); grants != nil {
+	if grants := ctrl.buildGatewayAccessGrants(NewNetworkIdentity(regReq.GetToken(), "").Key(), regResp.GetVirtualIp(), regReq.GetDeviceId()); grants != nil {
 		t.Fatalf("expected no grants after removing active gateway, got %+v", grants)
 	}
 	if len(ctrl.gatewayGrantCache) != 0 {
@@ -3528,11 +3647,12 @@ func registerWithPendingHandshakeCapabilities(ctrl *Controller, request *protoco
 }
 
 func registerWithPendingHandshakeCapabilitiesAndVirtualIP(ctrl *Controller, request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, uint32, error) {
-	return ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(
+	respPacket, virtualIP, _, err := ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(
 		request,
 		remoteAddr,
 		ctrl.pendingHandshakeCapabilities(remoteAddr),
 	)
+	return respPacket, virtualIP, err
 }
 
 func handshakeRemote(t *testing.T, ctrl *Controller, remoteAddr net.Addr) net.Addr {

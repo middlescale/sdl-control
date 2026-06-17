@@ -48,9 +48,6 @@ type Controller struct {
 	gatewayGrantPolicyRev   uint64
 	gatewayGrantCache       map[string]cachedGatewayGrant
 
-	renameMu            sync.Mutex
-	pendingDeviceRename map[string]PendingDeviceRename
-
 	debugMu                  sync.Mutex
 	debugCollectSeq          uint64
 	debugWatchSeq            uint64
@@ -120,16 +117,6 @@ type DeviceAdminView struct {
 	AuthExpireAtUnix   int64  `json:"auth_expire_at_unix,omitempty"`
 	AuthExpired        bool   `json:"auth_expired,omitempty"`
 	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
-}
-
-type PendingDeviceRename struct {
-	RequestID       uint64
-	SourceVirtualIP uint32
-	UserID          string
-	Group           string
-	DeviceID        string
-	RequestedName   string
-	RequestedAtUnix int64
 }
 
 const maxPunchAttemptsPerPair = 3
@@ -234,7 +221,6 @@ func NewController(cfg *config.Config, db *sql.DB) (*Controller, error) {
 		gatewaySeen:              make(map[string]GatewayNodeInfo),
 		gatewayNonce:             make(map[string]map[string]int64),
 		gatewayGrantCache:        make(map[string]cachedGatewayGrant),
-		pendingDeviceRename:      make(map[string]PendingDeviceRename),
 		pendingDebugCollect:      make(map[uint64]chan DebugCollectResult),
 		pendingDebugWatchStart:   make(map[uint64]chan DebugWatchStartResult),
 		pendingDebugWatchStop:    make(map[uint64]chan DebugWatchStopResult),
@@ -426,33 +412,36 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 	request *protocol.Packet,
 	remoteAddr net.Addr,
 	negotiatedCapabilities []string,
-) (*protocol.Packet, uint32, error) {
+) (*protocol.Packet, uint32, NetworkIdentity, error) {
 	log.Debugf("收到客户端 RegistrationRequest Packet: %s", request.DebugString())
 	var registration pb.RegistrationRequest
 	if err := proto.Unmarshal(request.Payload, &registration); err != nil {
 		log.Errorf("RegistrationRequest unmarshal error: %v", err)
-		return nil, 0, err
+		return nil, 0, NetworkIdentity{}, err
 	}
 	if err := validateRegistrationRequest(&registration); err != nil {
 		log.Errorf("RegistrationRequest validate error: %v", err)
-		return nil, 0, err
+		return nil, 0, NetworkIdentity{}, err
 	}
 
-	domain := registration.GetToken()
-	gateway, netmask, err := c.resolveGroupNetworkConfig(domain)
+	authGroup := registration.GetToken()
+	gateway, netmask, err := c.resolveGroupNetworkConfig(authGroup)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, NetworkIdentity{}, err
 	}
-	if err := c.UMCheckAuthedDevice(domain, registration.GetDeviceId(), registration.GetDevicePubKey()); err != nil {
-		c.clearStaleClientStateByDeviceID(domain, registration.GetDeviceId())
-		return nil, 0, fmt.Errorf("device %s auth check failed for group %s: %w", registration.GetDeviceId(), domain, err)
+	if err := c.UMCheckAuthedDevice(authGroup, registration.GetDeviceId(), registration.GetDevicePubKey()); err != nil {
+		c.clearStaleClientStateByDeviceID(authGroup, registration.GetDeviceId())
+		return nil, 0, NetworkIdentity{}, fmt.Errorf("device %s auth check failed for group %s: %w", registration.GetDeviceId(), authGroup, err)
 	}
 	displayName := strings.TrimSpace(registration.GetName())
-	if existing, ok := c.UMGetAuthedDevice(domain, registration.GetDeviceId()); ok {
-		if persisted := strings.TrimSpace(existing.DisplayName); persisted != "" {
-			displayName = persisted
-		}
+	authRecord, ok := c.UMGetAuthedDevice(authGroup, registration.GetDeviceId())
+	if !ok {
+		return nil, 0, NetworkIdentity{}, fmt.Errorf("device %s auth record missing for group %s", registration.GetDeviceId(), authGroup)
 	}
+	if persisted := strings.TrimSpace(authRecord.DisplayName); persisted != "" {
+		displayName = persisted
+	}
+	networkIdentity := NewNetworkIdentity(authGroup, authRecord.UserID)
 	if !hasCapability(negotiatedCapabilities, capabilityUDPEndpointReportV1) {
 		log.Warnf(
 			"client %s missing handshake capability %q; allowing registration with relay-only compatibility",
@@ -464,11 +453,11 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 	raddrStr := remoteAddr.String()
 	host, portStr, err := net.SplitHostPort(raddrStr)
 	if err != nil {
-		return nil, 0, fmt.Errorf("Failed to parse remote address: %v", err)
+		return nil, 0, NetworkIdentity{}, fmt.Errorf("Failed to parse remote address: %v", err)
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 0 || port > 65535 {
-		return nil, 0, fmt.Errorf("invalid remote port: %q", portStr)
+		return nil, 0, NetworkIdentity{}, fmt.Errorf("invalid remote port: %q", portStr)
 	}
 	pubPort := uint32(port)
 
@@ -484,15 +473,15 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 	}
 	registrationResp.VirtualGateway = util.IpToUint32(gateway)
 	registrationResp.VirtualNetmask = util.MaskToUint32(netmask)
-	registrationResp.DnsProfile = c.BuildClientDNSProfile(domain)
+	registrationResp.DnsProfile = c.BuildClientDNSProfile(authGroup)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	netInfo, netInfoExist := c.nc.VirtualNetwork.Get(domain)
+	netInfo, netInfoExist := c.nc.VirtualNetwork.Get(networkIdentity.Key())
 	if !netInfoExist {
-		netInfo = NewNetworkInfo(domain, netmask, net.IP(gateway), c.reservedServiceIPs(domain))
-		c.nc.VirtualNetwork.Set(domain, netInfo)
+		netInfo = NewNetworkInfo(networkIdentity.Key(), netmask, net.IP(gateway), c.reservedServiceIPs(authGroup))
+		c.nc.VirtualNetwork.Set(networkIdentity.Key(), netInfo)
 	}
 	virtualIP, oldIP, err := c.nc.generateIP(
 		netInfo,
@@ -501,16 +490,20 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 		registration.GetAllowIpChange(),
 	)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, NetworkIdentity{}, err
 	}
 	if oldIP != 0 && oldIP != virtualIP {
 		netInfo.DeleteClient(oldIP)
-		c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(oldIP)))
+		c.nc.IPSessions.Delete(NewIpSessionKey(networkIdentity.Key(), util.Uint32ToIP(oldIP)))
 	}
 	clientInfo := netInfo.Clients[virtualIP]
 	now := time.Now().Unix()
 	clientInfo.DeviceId = registration.GetDeviceId()
 	clientInfo.Name = displayName
+	clientInfo.UserID = authRecord.UserID
+	clientInfo.NetworkKey = networkIdentity.Key()
+	clientInfo.AuthGroup = authGroup
+	clientInfo.NetworkScope = networkIdentity.Scope()
 	clientInfo.Version = registration.GetVersion()
 	clientInfo.Capabilities = negotiatedCapabilities
 	clientInfo.ControlOnline = true
@@ -524,11 +517,11 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 	clientInfo.OnlineKxPub = append(clientInfo.OnlineKxPub[:0], registration.GetOnlineKxPub()...)
 	clientInfo.LastJoin = now
 	netInfo.UpsertClient(virtualIP, clientInfo)
-	c.nc.IPSessions.Delete(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)))
+	c.nc.IPSessions.Delete(NewIpSessionKey(networkIdentity.Key(), util.Uint32ToIP(virtualIP)))
 	c.nc.TouchCipherSession(remoteAddr)
 	netInfo.Epoch++
 	registrationResp.VirtualIp = virtualIP
-	gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsForExistingClient(virtualIP, registration.GetDeviceId())
+	gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsForExistingClient(networkIdentity.Key(), virtualIP, registration.GetDeviceId())
 	registrationResp.GatewayAccessGrant = selectPrimaryGatewayGrant(gatewayGrants)
 	registrationResp.GatewayAccessGrants = gatewayGrants
 	registrationResp.GatewayPolicyRev = gatewayPolicyRev
@@ -537,7 +530,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 
 	respBytes, err := proto.Marshal(registrationResp)
 	if err != nil {
-		return nil, 0, fmt.Errorf("RegistrationResponse marshal error: %v", err)
+		return nil, 0, NetworkIdentity{}, fmt.Errorf("RegistrationResponse marshal error: %v", err)
 	}
 
 	respPacket := &protocol.Packet{
@@ -551,7 +544,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 		Payload:   respBytes,
 	}
 
-	return respPacket, virtualIP, nil
+	return respPacket, virtualIP, networkIdentity, nil
 }
 
 func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protocol.Packet, uint32, error) {
@@ -580,7 +573,10 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 	srcIP := util.IpToUint32(request.SrcIP)
 	groupName := ""
 	c.nc.VirtualNetwork.mutex.RLock()
-	for _, network := range c.nc.VirtualNetwork.data {
+	for key, network := range c.nc.VirtualNetwork.data {
+		if strings.TrimSpace(request.RouteNetworkKey) != "" && key != request.RouteNetworkKey {
+			continue
+		}
 		client, ok := network.Clients[srcIP]
 		if !ok {
 			continue
@@ -594,7 +590,16 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 			})
 			return resp, 0, err
 		}
-		groupName = network.Group
+		if c.networkHasDuplicateDeviceNameLocked(network, deviceID, newName) {
+			c.nc.VirtualNetwork.mutex.RUnlock()
+			resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+				RequestId: req.GetRequestId(),
+				Ok:        false,
+				Reason:    "device name already exists",
+			})
+			return resp, 0, err
+		}
+		groupName = clientAuthGroup(client, network.Group)
 		break
 	}
 	c.nc.VirtualNetwork.mutex.RUnlock()
@@ -614,7 +619,6 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 		})
 		return resp, 0, packetErr
 	}
-	c.clearPendingDeviceRename(groupName, deviceID)
 	resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
 		RequestId:   req.GetRequestId(),
 		Ok:          true,
@@ -624,35 +628,60 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 	return resp, 0, err
 }
 
-func (c *Controller) clearStaleClientStateByDeviceID(domain, deviceID string) {
+func (c *Controller) networkHasDuplicateDeviceNameLocked(network *NetworkInfo, deviceID string, newName string) bool {
+	newName = strings.TrimSpace(newName)
+	if network == nil || newName == "" {
+		return false
+	}
+	for _, client := range network.Clients {
+		if client.DeviceId == deviceID {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(client.Name), newName) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeRenameName(newName string) (string, error) {
+	newName = strings.TrimSpace(newName)
+	if newName == "" {
+		return "", fmt.Errorf("name is empty")
+	}
+	if len(newName) > 128 {
+		return "", fmt.Errorf("name too long")
+	}
+	return newName, nil
+}
+
+func (c *Controller) clearStaleClientStateByDeviceID(authGroup, deviceID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	netInfo, ok := c.nc.VirtualNetwork.Get(domain)
-	if !ok {
-		return
-	}
-	changed := false
 	now := time.Now().Unix()
-	for virtualIP, clientInfo := range netInfo.Clients {
-		if clientInfo.DeviceId != deviceID {
-			continue
+	for _, netInfo := range c.nc.VirtualNetwork.data {
+		networkChanged := false
+		for virtualIP, clientInfo := range netInfo.Clients {
+			if clientInfo.DeviceId != deviceID || clientAuthGroup(clientInfo, netInfo.Group) != authGroup {
+				continue
+			}
+			if !clientInfo.ControlOnline && clientInfo.ClientStatus == nil && !clientInfo.DataPlaneReachable {
+				continue
+			}
+			clientInfo.ControlOnline = false
+			clientInfo.ControlLastSeen = now
+			clientInfo.DataPlaneReachable = false
+			clientInfo.DataPlaneLastSeen = 0
+			clientInfo.ClientStatus = nil
+			clientInfo.PreferredChannelMode = pb.ChannelMode_CHANNEL_MODE_AUTO
+			netInfo.UpsertClient(virtualIP, clientInfo)
+			c.nc.IPSessions.Set(NewIpSessionKey(netInfo.Group, util.Uint32ToIP(virtualIP)), clientInfo.Address)
+			networkChanged = true
 		}
-		if !clientInfo.ControlOnline && clientInfo.ClientStatus == nil && !clientInfo.DataPlaneReachable {
-			continue
+		if networkChanged {
+			netInfo.Epoch++
 		}
-		clientInfo.ControlOnline = false
-		clientInfo.ControlLastSeen = now
-		clientInfo.DataPlaneReachable = false
-		clientInfo.DataPlaneLastSeen = 0
-		clientInfo.ClientStatus = nil
-		clientInfo.PreferredChannelMode = pb.ChannelMode_CHANNEL_MODE_AUTO
-		netInfo.UpsertClient(virtualIP, clientInfo)
-		c.nc.IPSessions.Set(NewIpSessionKey(domain, util.Uint32ToIP(virtualIP)), clientInfo.Address)
-		changed = true
-	}
-	if changed {
-		netInfo.Epoch++
 	}
 }
 
@@ -710,13 +739,21 @@ func classifyRegistrationError(err error) (uint32, pb.RegistrationErrorReason, s
 }
 
 func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	return c.HandlePullDeviceListPacketInNetwork(request, request.RouteNetworkKey)
+}
+
+func (c *Controller) HandlePullDeviceListPacketInNetwork(request *protocol.Packet, networkKey string) (*protocol.Packet, error) {
 	selfIP := util.IpToUint32(request.SrcIP)
-	deviceList, ok := c.nc.DeviceListByIP(selfIP)
+	deviceList, ok := c.nc.DeviceListByIPInNetwork(networkKey, selfIP)
 	if !ok {
 		return c.buildDisconnectPacket(request), nil
 	}
-	if client, ok := c.nc.FindClientByVirtualIP(selfIP); ok {
-		deviceList.GatewayAccessGrants, deviceList.GatewayPolicyRev = c.buildGatewayAccessGrantsForExistingClient(selfIP, client.DeviceId)
+	if client, ok := c.nc.FindClientByVirtualIPInNetwork(networkKey, selfIP); ok {
+		routeNetworkKey := networkKey
+		if strings.TrimSpace(routeNetworkKey) == "" {
+			routeNetworkKey = clientNetworkKey(client, "")
+		}
+		deviceList.GatewayAccessGrants, deviceList.GatewayPolicyRev = c.buildGatewayAccessGrantsForExistingClient(routeNetworkKey, selfIP, client.DeviceId)
 	}
 	payload, err := proto.Marshal(deviceList)
 	if err != nil {
@@ -735,10 +772,17 @@ func (c *Controller) HandlePullDeviceListPacket(request *protocol.Packet) (*prot
 }
 
 func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) ([]*protocol.Packet, error) {
+	return c.BuildPushDeviceListPacketsForPeerChangeInNetwork("", changedIP)
+}
+
+func (c *Controller) BuildPushDeviceListPacketsForPeerChangeInNetwork(networkKey string, changedIP uint32) ([]*protocol.Packet, error) {
 	c.nc.VirtualNetwork.mutex.RLock()
 	defer c.nc.VirtualNetwork.mutex.RUnlock()
 
-	for _, network := range c.nc.VirtualNetwork.data {
+	for key, network := range c.nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
 		changedClient, ok := network.Clients[changedIP]
 		if !ok {
 			continue
@@ -746,13 +790,19 @@ func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) (
 		if !changedClient.ControlOnline {
 			return nil, nil
 		}
+		changedScope := clientNetworkScope(changedClient, network.Group)
 		packets := make([]*protocol.Packet, 0, len(network.Clients))
 		for targetIP, targetClient := range network.Clients {
 			if targetIP == changedIP || !targetClient.ControlOnline {
 				continue
 			}
-			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsForExistingClient(targetIP, targetClient.DeviceId)
+			if clientNetworkScope(targetClient, network.Group) != changedScope {
+				continue
+			}
+			targetNetworkKey := clientNetworkKey(targetClient, network.Group)
+			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsForExistingClient(targetNetworkKey, targetIP, targetClient.DeviceId)
 			packet, err := c.buildPushDeviceListPacket(
+				targetNetworkKey,
 				targetIP,
 				uint32(network.Epoch),
 				buildDeviceInfoList(network.Clients, targetIP),
@@ -779,8 +829,10 @@ func (c *Controller) BuildPushDeviceListPacketsForGatewayChange() ([]*protocol.P
 			if !targetClient.ControlOnline {
 				continue
 			}
-			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsForExistingClient(targetIP, targetClient.DeviceId)
+			targetNetworkKey := clientNetworkKey(targetClient, network.Group)
+			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsForExistingClient(targetNetworkKey, targetIP, targetClient.DeviceId)
 			packet, err := c.buildPushDeviceListPacket(
+				targetNetworkKey,
 				targetIP,
 				uint32(network.Epoch),
 				buildDeviceInfoList(network.Clients, targetIP),
@@ -807,6 +859,7 @@ func (c *Controller) BuildPushDeviceListPacketsForGatewayChangeIfNeeded() ([]*pr
 }
 
 func (c *Controller) buildPushDeviceListPacket(
+	networkKey string,
 	targetIP uint32,
 	epoch uint32,
 	deviceInfoList []*pb.DeviceInfo,
@@ -824,43 +877,15 @@ func (c *Controller) buildPushDeviceListPacket(
 		return nil, fmt.Errorf("DeviceList marshal error: %v", err)
 	}
 	return &protocol.Packet{
-		Ver:       protocol.V3,
-		Proto:     protocol.ProtocolService,
-		AppProto:  protocol.AppProtoPushDeviceList,
-		SourceTTL: protocol.MAX_TTL,
-		TTL:       protocol.MAX_TTL,
-		SrcIP:     net.ParseIP("0.0.0.1"),
-		DstIP:     util.Uint32ToIP(targetIP),
-		Payload:   payload,
-	}, nil
-}
-
-func (c *Controller) BuildDeviceRenameNotifyPacket(
-	targetIP uint32,
-	requestID uint64,
-	appliedName string,
-) (*protocol.Packet, error) {
-	if targetIP == 0 {
-		return nil, nil
-	}
-	resp := &pb.DeviceRenameResponse{
-		RequestId:   requestID,
-		Ok:          true,
-		AppliedName: appliedName,
-	}
-	payload, err := proto.Marshal(resp)
-	if err != nil {
-		return nil, fmt.Errorf("DeviceRenameResponse marshal error: %v", err)
-	}
-	return &protocol.Packet{
-		Ver:       protocol.V3,
-		Proto:     protocol.ProtocolService,
-		AppProto:  protocol.AppProtoDeviceRenameResponse,
-		SourceTTL: protocol.MAX_TTL,
-		TTL:       protocol.MAX_TTL,
-		SrcIP:     net.ParseIP("0.0.0.1"),
-		DstIP:     util.Uint32ToIP(targetIP),
-		Payload:   payload,
+		Ver:             protocol.V3,
+		Proto:           protocol.ProtocolService,
+		AppProto:        protocol.AppProtoPushDeviceList,
+		SourceTTL:       protocol.MAX_TTL,
+		TTL:             protocol.MAX_TTL,
+		SrcIP:           net.ParseIP("0.0.0.1"),
+		DstIP:           util.Uint32ToIP(targetIP),
+		Payload:         payload,
+		RouteNetworkKey: networkKey,
 	}, nil
 }
 
@@ -975,6 +1000,10 @@ func (c *Controller) HandleDeviceAuthProofPacket(request *protocol.Packet) (*pro
 }
 
 func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	return c.HandleRefreshGatewayGrantPacketInNetwork(request, request.RouteNetworkKey)
+}
+
+func (c *Controller) HandleRefreshGatewayGrantPacketInNetwork(request *protocol.Packet, networkKey string) (*protocol.Packet, error) {
 	var req pb.RefreshGatewayGrantRequest
 	if err := proto.Unmarshal(request.Payload, &req); err != nil {
 		return nil, err
@@ -988,8 +1017,13 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 	if srcIP := request.SrcIP.To4(); srcIP == nil || util.IpToUint32(srcIP) != req.GetVirtualIp() {
 		return nil, fmt.Errorf("refresh gateway grant source mismatch")
 	}
-	if !c.clientOwnsVirtualIP(req.GetVirtualIp(), req.GetDeviceId()) {
+	if !c.clientOwnsVirtualIPInNetwork(networkKey, req.GetVirtualIp(), req.GetDeviceId()) {
 		return nil, fmt.Errorf("refresh gateway grant device mismatch")
+	}
+	if strings.TrimSpace(networkKey) == "" {
+		if client, ok := c.nc.FindClientByVirtualIP(req.GetVirtualIp()); ok {
+			networkKey = clientNetworkKey(client, "")
+		}
 	}
 
 	resp := &pb.RefreshGatewayGrantResponse{
@@ -998,6 +1032,7 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 		Result:    pb.RefreshGatewayGrantResult_REFRESH_GATEWAY_GRANT_RESULT_UPDATED,
 	}
 	grants, gatewayPolicyRev, changed := c.buildGatewayAccessGrantsForRefresh(
+		networkKey,
 		req.GetVirtualIp(),
 		req.GetDeviceId(),
 		req.GetLastSessionId(),
@@ -1043,6 +1078,10 @@ func (c *Controller) HandleRefreshGatewayGrantPacket(request *protocol.Packet) (
 }
 
 func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) (bool, error) {
+	return c.HandleClientStatusInfoPacketInNetwork(request, request.RouteNetworkKey)
+}
+
+func (c *Controller) HandleClientStatusInfoPacketInNetwork(request *protocol.Packet, networkKey string) (bool, error) {
 	var status pb.ClientStatusInfo
 	if err := proto.Unmarshal(request.Payload, &status); err != nil {
 		return false, fmt.Errorf("ClientStatusInfo unmarshal error: %v", err)
@@ -1104,7 +1143,10 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) (boo
 	reachable := len(clientStatus.P2PList) > 0
 	c.nc.VirtualNetwork.mutex.Lock()
 	defer c.nc.VirtualNetwork.mutex.Unlock()
-	for _, network := range c.nc.VirtualNetwork.data {
+	for key, network := range c.nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
 		client, ok := network.Clients[srcIP]
 		if !ok {
 			continue
@@ -1125,12 +1167,19 @@ func (c *Controller) HandleClientStatusInfoPacket(request *protocol.Packet) (boo
 }
 
 func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) ([]*protocol.Packet, error) {
+	return c.BuildPunchStartPacketsFromStatusInNetwork(request, request.RouteNetworkKey)
+}
+
+func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol.Packet, networkKey string) ([]*protocol.Packet, error) {
 	srcIP := util.IpToUint32(request.SrcIP)
 	now := time.Now()
 	nowMs := now.UnixMilli()
 	c.nc.VirtualNetwork.mutex.RLock()
 	defer c.nc.VirtualNetwork.mutex.RUnlock()
-	for _, network := range c.nc.VirtualNetwork.data {
+	for key, network := range c.nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
 		srcClient, ok := network.Clients[srcIP]
 		if !ok || !srcClient.ControlOnline || srcClient.ClientStatus == nil {
 			continue
@@ -1234,24 +1283,26 @@ func (c *Controller) BuildPunchStartPacketsFromStatus(request *protocol.Packet) 
 			}
 			return []*protocol.Packet{
 				{
-					Ver:       protocol.V3,
-					Proto:     protocol.ProtocolService,
-					AppProto:  protocol.AppProtoPunchStart,
-					SourceTTL: protocol.MAX_TTL,
-					TTL:       protocol.MAX_TTL,
-					SrcIP:     request.DstIP,
-					DstIP:     util.Uint32ToIP(srcIP),
-					Payload:   sourcePayload,
+					Ver:             protocol.V3,
+					Proto:           protocol.ProtocolService,
+					AppProto:        protocol.AppProtoPunchStart,
+					SourceTTL:       protocol.MAX_TTL,
+					TTL:             protocol.MAX_TTL,
+					SrcIP:           request.DstIP,
+					DstIP:           util.Uint32ToIP(srcIP),
+					Payload:         sourcePayload,
+					RouteNetworkKey: key,
 				},
 				{
-					Ver:       protocol.V3,
-					Proto:     protocol.ProtocolService,
-					AppProto:  protocol.AppProtoPunchStart,
-					SourceTTL: protocol.MAX_TTL,
-					TTL:       protocol.MAX_TTL,
-					SrcIP:     request.DstIP,
-					DstIP:     util.Uint32ToIP(targetIP),
-					Payload:   targetPayload,
+					Ver:             protocol.V3,
+					Proto:           protocol.ProtocolService,
+					AppProto:        protocol.AppProtoPunchStart,
+					SourceTTL:       protocol.MAX_TTL,
+					TTL:             protocol.MAX_TTL,
+					SrcIP:           request.DstIP,
+					DstIP:           util.Uint32ToIP(targetIP),
+					Payload:         targetPayload,
+					RouteNetworkKey: key,
 				},
 			}, nil
 		}
@@ -1299,6 +1350,10 @@ func shouldSuppressPunchStartForOtherTrigger(
 }
 
 func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protocol.Packet, error) {
+	return c.HandlePunchRequestPacketInNetwork(request, request.RouteNetworkKey)
+}
+
+func (c *Controller) HandlePunchRequestPacketInNetwork(request *protocol.Packet, networkKey string) (*protocol.Packet, error) {
 	var req pb.PunchRequest
 	if err := proto.Unmarshal(request.Payload, &req); err != nil {
 		return nil, fmt.Errorf("PunchRequest unmarshal error: %v", err)
@@ -1310,7 +1365,7 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 	if req.GetSessionId() == 0 || req.GetAttempt() == 0 {
 		return nil, fmt.Errorf("invalid punch request, session_id and attempt must be non-zero")
 	}
-	if _, ok := c.nc.FindClientByVirtualIP(req.GetTarget()); !ok {
+	if _, ok := c.nc.FindClientByVirtualIPInNetwork(networkKey, req.GetTarget()); !ok {
 		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
 	}
 	now := time.Now().Unix()
@@ -1359,6 +1414,10 @@ func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protoc
 }
 
 func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protocol.Packet, error) {
+	return c.BuildPunchStartPacketsInNetwork(request, request.RouteNetworkKey)
+}
+
+func (c *Controller) BuildPunchStartPacketsInNetwork(request *protocol.Packet, networkKey string) ([]*protocol.Packet, error) {
 	var req pb.PunchRequest
 	if err := proto.Unmarshal(request.Payload, &req); err != nil {
 		return nil, fmt.Errorf("PunchRequest unmarshal error: %v", err)
@@ -1370,10 +1429,10 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 	if req.GetSessionId() == 0 || req.GetAttempt() == 0 {
 		return nil, fmt.Errorf("invalid punch request, session_id and attempt must be non-zero")
 	}
-	if _, ok := c.nc.FindClientByVirtualIP(sourceIP); !ok {
+	if _, ok := c.nc.FindClientByVirtualIPInNetwork(networkKey, sourceIP); !ok {
 		return nil, fmt.Errorf("punch source %s not registered", util.Uint32ToIP(sourceIP))
 	}
-	if _, ok := c.nc.FindClientByVirtualIP(req.GetTarget()); !ok {
+	if _, ok := c.nc.FindClientByVirtualIPInNetwork(networkKey, req.GetTarget()); !ok {
 		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
 	}
 	sourceStart := &pb.PunchStart{
@@ -1410,24 +1469,26 @@ func (c *Controller) BuildPunchStartPackets(request *protocol.Packet) ([]*protoc
 	}
 	return []*protocol.Packet{
 		{
-			Ver:       protocol.V3,
-			Proto:     protocol.ProtocolService,
-			AppProto:  protocol.AppProtoPunchStart,
-			SourceTTL: protocol.MAX_TTL,
-			TTL:       protocol.MAX_TTL,
-			SrcIP:     request.DstIP,
-			DstIP:     util.Uint32ToIP(sourceIP),
-			Payload:   sourcePayload,
+			Ver:             protocol.V3,
+			Proto:           protocol.ProtocolService,
+			AppProto:        protocol.AppProtoPunchStart,
+			SourceTTL:       protocol.MAX_TTL,
+			TTL:             protocol.MAX_TTL,
+			SrcIP:           request.DstIP,
+			DstIP:           util.Uint32ToIP(sourceIP),
+			Payload:         sourcePayload,
+			RouteNetworkKey: networkKey,
 		},
 		{
-			Ver:       protocol.V3,
-			Proto:     protocol.ProtocolService,
-			AppProto:  protocol.AppProtoPunchStart,
-			SourceTTL: protocol.MAX_TTL,
-			TTL:       protocol.MAX_TTL,
-			SrcIP:     request.DstIP,
-			DstIP:     util.Uint32ToIP(req.GetTarget()),
-			Payload:   targetPayload,
+			Ver:             protocol.V3,
+			Proto:           protocol.ProtocolService,
+			AppProto:        protocol.AppProtoPunchStart,
+			SourceTTL:       protocol.MAX_TTL,
+			TTL:             protocol.MAX_TTL,
+			SrcIP:           request.DstIP,
+			DstIP:           util.Uint32ToIP(req.GetTarget()),
+			Payload:         targetPayload,
+			RouteNetworkKey: networkKey,
 		},
 	}, nil
 }
@@ -1575,13 +1636,17 @@ func (c *Controller) ReconcilePunchSessions(nowUnixMs int64) {
 }
 
 func (c *Controller) HandleControlPacket(request *protocol.Packet, remoteAddr net.Addr) (*protocol.Packet, error) {
+	return c.HandleControlPacketInNetwork(request, remoteAddr, request.RouteNetworkKey)
+}
+
+func (c *Controller) HandleControlPacketInNetwork(request *protocol.Packet, remoteAddr net.Addr, networkKey string) (*protocol.Packet, error) {
 	switch protocol.ControlProtocol(request.AppProto) {
 	case protocol.ControlPing:
 		pingTime, _, err := protocol.ParsePingPayload(request.Payload)
 		if err != nil {
 			return nil, err
 		}
-		epoch := c.nc.TouchClientByIP(request.SrcIP)
+		epoch := c.nc.TouchClientByIPInNetwork(networkKey, request.SrcIP)
 		if epoch == 0 {
 			log.Warnf("received control ping from srcIP=%s but client touch failed, sending disconnect packet", request.SrcIP)
 			return c.buildDisconnectPacket(request), nil
@@ -1832,6 +1897,26 @@ func NewIpSessionKey(id string, ip net.IP) IpSessionKey {
 		ID: id,
 		IP: ip.String(),
 	}
+}
+
+func networkScopeForAuth(groupName, userID string) string {
+	return NewNetworkIdentity(groupName, userID).Scope()
+}
+
+func isPersonalSDLUser(userID string) bool {
+	return strings.HasPrefix(strings.TrimSpace(userID), personalUserIDPrefix)
+}
+
+func clientAuthGroup(client ClientInfo, fallback string) string {
+	return NetworkIdentityFromClient(client, fallback).AuthGroup()
+}
+
+func clientNetworkKey(client ClientInfo, fallback string) string {
+	return NetworkIdentityFromClient(client, fallback).Key()
+}
+
+func clientNetworkScope(client ClientInfo, fallbackGroup string) string {
+	return NetworkIdentityFromClient(client, fallbackGroup).Scope()
 }
 
 func parseNetmask(netmask string) (net.IPMask, error) {
@@ -2164,7 +2249,8 @@ func (c *Controller) ListDevices(userID string) []DeviceAdminView {
 
 	for _, network := range c.nc.VirtualNetwork.data {
 		for ip, client := range network.Clients {
-			key := network.Group + "\x00" + client.DeviceId
+			authGroup := clientAuthGroup(client, network.Group)
+			key := authGroup + "\x00" + client.DeviceId
 			device, ok := deviceByGroupDevice[key]
 			if !ok {
 				continue
@@ -2179,7 +2265,7 @@ func (c *Controller) ListDevices(userID string) []DeviceAdminView {
 			if strings.TrimSpace(client.Name) != "" {
 				device.Name = client.Name
 			}
-			device.Group = network.Group
+			device.Group = authGroup
 			device.VirtualIP = util.Uint32ToIP(ip).String()
 			device.ControlOnline = client.ControlOnline
 			device.DataPlaneReachable = client.DataPlaneReachable
@@ -2266,34 +2352,35 @@ func (c *Controller) recordGatewaySeen(info GatewayNodeInfo) {
 	c.gatewayMu.Unlock()
 }
 
-func (c *Controller) buildGatewayAccessGrant(virtualIP uint32, deviceID string) *pb.GatewayAccessGrant {
-	return selectPrimaryGatewayGrant(c.buildGatewayAccessGrants(virtualIP, deviceID))
+func (c *Controller) buildGatewayAccessGrant(networkKey string, virtualIP uint32, deviceID string) *pb.GatewayAccessGrant {
+	return selectPrimaryGatewayGrant(c.buildGatewayAccessGrants(networkKey, virtualIP, deviceID))
 }
 
-func (c *Controller) buildGatewayAccessGrants(virtualIP uint32, deviceID string) []*pb.GatewayAccessGrant {
-	grants, _ := c.buildGatewayAccessGrantsWithPolicyRev(virtualIP, deviceID)
+func (c *Controller) buildGatewayAccessGrants(networkKey string, virtualIP uint32, deviceID string) []*pb.GatewayAccessGrant {
+	grants, _ := c.buildGatewayAccessGrantsWithPolicyRev(networkKey, virtualIP, deviceID)
 	return grants
 }
 
-func (c *Controller) buildGatewayAccessGrantsWithPolicyRev(virtualIP uint32, deviceID string) ([]*pb.GatewayAccessGrant, uint64) {
-	grants, policyRev, _ := c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{})
+func (c *Controller) buildGatewayAccessGrantsWithPolicyRev(networkKey string, virtualIP uint32, deviceID string) ([]*pb.GatewayAccessGrant, uint64) {
+	grants, policyRev, _ := c.buildGatewayAccessGrantsLocked(networkKey, virtualIP, deviceID, gatewayGrantBuildOptions{})
 	return grants, policyRev
 }
 
-func (c *Controller) buildGatewayAccessGrantsForExistingClient(virtualIP uint32, deviceID string) ([]*pb.GatewayAccessGrant, uint64) {
-	grants, policyRev, _ := c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{
+func (c *Controller) buildGatewayAccessGrantsForExistingClient(networkKey string, virtualIP uint32, deviceID string) ([]*pb.GatewayAccessGrant, uint64) {
+	grants, policyRev, _ := c.buildGatewayAccessGrantsLocked(networkKey, virtualIP, deviceID, gatewayGrantBuildOptions{
 		retainExisting: true,
 	})
 	return grants, policyRev
 }
 
 func (c *Controller) buildGatewayAccessGrantsForRefresh(
+	networkKey string,
 	virtualIP uint32,
 	deviceID string,
 	lastSessionID uint64,
 	forceReissue bool,
 ) ([]*pb.GatewayAccessGrant, uint64, bool) {
-	return c.buildGatewayAccessGrantsLocked(virtualIP, deviceID, gatewayGrantBuildOptions{
+	return c.buildGatewayAccessGrantsLocked(networkKey, virtualIP, deviceID, gatewayGrantBuildOptions{
 		lastSessionID:  lastSessionID,
 		forceReissue:   forceReissue,
 		refresh:        true,
@@ -2302,6 +2389,7 @@ func (c *Controller) buildGatewayAccessGrantsForRefresh(
 }
 
 func (c *Controller) buildGatewayAccessGrantsLocked(
+	networkKey string,
 	virtualIP uint32,
 	deviceID string,
 	opts gatewayGrantBuildOptions,
@@ -2316,7 +2404,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 		return nil, policyRev, false
 	}
 	if opts.refresh && opts.lastSessionID != 0 {
-		opts.lastSessionIDValid = c.gatewayGrantSessionKnownLocked(virtualIP, deviceID, opts.lastSessionID)
+		opts.lastSessionIDValid = c.gatewayGrantSessionKnownLocked(networkKey, virtualIP, deviceID, opts.lastSessionID)
 	}
 	hardExpire := now.Add(gatewayGrantHardTTL)
 	softRefreshAfter := hardExpire.Add(-gatewayGrantSoftRefreshLead)
@@ -2326,6 +2414,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 	changed := false
 	for index, node := range nodes {
 		grant, grantChanged := c.gatewayAccessGrantForNodeLocked(
+			networkKey,
 			virtualIP,
 			deviceID,
 			node,
@@ -2345,6 +2434,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 	}
 	if opts.retainExisting {
 		grants = append(grants, c.retainedGatewayAccessGrantsLocked(
+			networkKey,
 			virtualIP,
 			deviceID,
 			nodes,
@@ -2357,6 +2447,7 @@ func (c *Controller) buildGatewayAccessGrantsLocked(
 }
 
 func (c *Controller) gatewayAccessGrantForNodeLocked(
+	networkKey string,
 	virtualIP uint32,
 	deviceID string,
 	node GatewayNodeInfo,
@@ -2369,7 +2460,7 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 	opts gatewayGrantBuildOptions,
 	now time.Time,
 ) (*pb.GatewayAccessGrant, bool) {
-	cacheKey := gatewayGrantCacheKey(virtualIP, deviceID, node.GatewayID)
+	cacheKey := gatewayGrantCacheKey(networkKey, virtualIP, deviceID, node.GatewayID)
 	nodeFingerprint := gatewayGrantNodeFingerprint(node)
 	cached, ok := c.gatewayGrantCache[cacheKey]
 	if opts.refresh {
@@ -2422,8 +2513,8 @@ func (c *Controller) gatewayAccessGrantForNodeLocked(
 	return grant, true
 }
 
-func (c *Controller) gatewayGrantSessionKnownLocked(virtualIP uint32, deviceID string, sessionID uint64) bool {
-	prefix := fmt.Sprintf("%d|%s|", virtualIP, deviceID)
+func (c *Controller) gatewayGrantSessionKnownLocked(networkKey string, virtualIP uint32, deviceID string, sessionID uint64) bool {
+	prefix := gatewayGrantCachePrefix(networkKey, virtualIP, deviceID)
 	for key, cacheItem := range c.gatewayGrantCache {
 		if strings.HasPrefix(key, prefix) && cacheItem.grant != nil && cacheItem.grant.GetSessionId() == sessionID {
 			return true
@@ -2447,6 +2538,7 @@ func (c *Controller) pruneGatewayGrantCacheLocked(now time.Time) {
 }
 
 func (c *Controller) retainedGatewayAccessGrantsLocked(
+	networkKey string,
 	virtualIP uint32,
 	deviceID string,
 	aliveNodes []GatewayNodeInfo,
@@ -2457,7 +2549,7 @@ func (c *Controller) retainedGatewayAccessGrantsLocked(
 	for _, node := range aliveNodes {
 		alive[node.GatewayID] = struct{}{}
 	}
-	prefix := fmt.Sprintf("%d|%s|", virtualIP, deviceID)
+	prefix := gatewayGrantCachePrefix(networkKey, virtualIP, deviceID)
 	expireThreshold := now.Add(30 * time.Second).UnixMilli()
 	grants := make([]*pb.GatewayAccessGrant, 0)
 	for key, cached := range c.gatewayGrantCache {
@@ -2628,8 +2720,12 @@ func cloneGatewayAccessGrant(grant *pb.GatewayAccessGrant) *pb.GatewayAccessGran
 	return cloned
 }
 
-func gatewayGrantCacheKey(virtualIP uint32, deviceID, gatewayID string) string {
-	return fmt.Sprintf("%d|%s|%s", virtualIP, deviceID, gatewayID)
+func gatewayGrantCachePrefix(networkKey string, virtualIP uint32, deviceID string) string {
+	return fmt.Sprintf("%s|%d|%s|", strings.TrimSpace(networkKey), virtualIP, deviceID)
+}
+
+func gatewayGrantCacheKey(networkKey string, virtualIP uint32, deviceID, gatewayID string) string {
+	return gatewayGrantCachePrefix(networkKey, virtualIP, deviceID) + gatewayID
 }
 
 func gatewayGrantNodeFingerprint(node GatewayNodeInfo) string {
@@ -3005,9 +3101,16 @@ func (c *Controller) resolveDNSServiceIP(group string) string {
 }
 
 func (c *Controller) clientOwnsVirtualIP(virtualIP uint32, deviceID string) bool {
+	return c.clientOwnsVirtualIPInNetwork("", virtualIP, deviceID)
+}
+
+func (c *Controller) clientOwnsVirtualIPInNetwork(networkKey string, virtualIP uint32, deviceID string) bool {
 	c.nc.VirtualNetwork.mutex.RLock()
 	defer c.nc.VirtualNetwork.mutex.RUnlock()
-	for _, network := range c.nc.VirtualNetwork.data {
+	for key, network := range c.nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
 		if client, ok := network.Clients[virtualIP]; ok {
 			return client.DeviceId == deviceID
 		}
@@ -3016,9 +3119,17 @@ func (c *Controller) clientOwnsVirtualIP(virtualIP uint32, deviceID string) bool
 }
 
 func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.DeviceInfo {
+	self, ok := clients[selfIP]
+	if !ok {
+		return nil
+	}
+	selfScope := clientNetworkScope(self, "")
 	deviceList := make([]*pb.DeviceInfo, 0, len(clients))
 	for ip, info := range clients {
 		if ip == selfIP {
+			continue
+		}
+		if clientNetworkScope(info, "") != selfScope {
 			continue
 		}
 		item := &pb.DeviceInfo{
@@ -3118,11 +3229,18 @@ func (nc *NetworkControl) generateIP(
 }
 
 func (nc *NetworkControl) TouchClientByIP(srcIP net.IP) uint16 {
+	return nc.TouchClientByIPInNetwork("", srcIP)
+}
+
+func (nc *NetworkControl) TouchClientByIPInNetwork(networkKey string, srcIP net.IP) uint16 {
 	ip := util.IpToUint32(srcIP)
 	nc.VirtualNetwork.mutex.Lock()
 	defer nc.VirtualNetwork.mutex.Unlock()
 	now := time.Now().Unix()
-	for _, network := range nc.VirtualNetwork.data {
+	for key, network := range nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
 		if client, ok := network.Clients[ip]; ok {
 			client.ControlOnline = true
 			client.ControlLastSeen = now
@@ -3181,9 +3299,16 @@ func (nc *NetworkControl) LeaveByRemoteAddr(remoteAddr net.Addr) {
 }
 
 func (nc *NetworkControl) DeviceListByIP(selfIP uint32) (*pb.DeviceList, bool) {
+	return nc.DeviceListByIPInNetwork("", selfIP)
+}
+
+func (nc *NetworkControl) DeviceListByIPInNetwork(networkKey string, selfIP uint32) (*pb.DeviceList, bool) {
 	nc.VirtualNetwork.mutex.RLock()
 	defer nc.VirtualNetwork.mutex.RUnlock()
-	for _, network := range nc.VirtualNetwork.data {
+	for key, network := range nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
 		if _, ok := network.Clients[selfIP]; !ok {
 			continue
 		}
@@ -3196,9 +3321,16 @@ func (nc *NetworkControl) DeviceListByIP(selfIP uint32) (*pb.DeviceList, bool) {
 }
 
 func (nc *NetworkControl) FindClientByVirtualIP(virtualIP uint32) (ClientInfo, bool) {
+	return nc.FindClientByVirtualIPInNetwork("", virtualIP)
+}
+
+func (nc *NetworkControl) FindClientByVirtualIPInNetwork(networkKey string, virtualIP uint32) (ClientInfo, bool) {
 	nc.VirtualNetwork.mutex.RLock()
 	defer nc.VirtualNetwork.mutex.RUnlock()
-	for _, network := range nc.VirtualNetwork.data {
+	for key, network := range nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
 		client, ok := network.Clients[virtualIP]
 		if ok {
 			return client, true
@@ -3212,23 +3344,40 @@ func (nc *NetworkControl) FindClientByDeviceID(groupName string, deviceID string
 	defer nc.VirtualNetwork.mutex.RUnlock()
 	network, ok := nc.VirtualNetwork.data[groupName]
 	if !ok {
+		for _, network := range nc.VirtualNetwork.data {
+			for _, client := range network.Clients {
+				if client.DeviceId == deviceID && strings.EqualFold(clientAuthGroup(client, network.Group), groupName) {
+					return client, true
+				}
+			}
+		}
 		return ClientInfo{}, false
 	}
 	virtualIP := network.FindClientIPByDeviceID(deviceID)
-	if virtualIP == 0 {
-		return ClientInfo{}, false
+	if virtualIP != 0 {
+		if client, ok := network.Clients[virtualIP]; ok {
+			return client, true
+		}
 	}
-	client, ok := network.Clients[virtualIP]
-	if !ok {
-		return ClientInfo{}, false
+	for _, client := range network.Clients {
+		if client.DeviceId == deviceID {
+			return client, true
+		}
 	}
-	return client, true
+	return ClientInfo{}, false
 }
 
 func (nc *NetworkControl) UpdateClientByVirtualIP(virtualIP uint32, update func(*ClientInfo)) bool {
+	return nc.UpdateClientByVirtualIPInNetwork("", virtualIP, update)
+}
+
+func (nc *NetworkControl) UpdateClientByVirtualIPInNetwork(networkKey string, virtualIP uint32, update func(*ClientInfo)) bool {
 	nc.VirtualNetwork.mutex.Lock()
 	defer nc.VirtualNetwork.mutex.Unlock()
-	for _, network := range nc.VirtualNetwork.data {
+	for key, network := range nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
 		client, ok := network.Clients[virtualIP]
 		if !ok {
 			continue

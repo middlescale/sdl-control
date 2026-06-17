@@ -22,14 +22,15 @@ import (
 注：e为是否加密标志，s为服务端通信包标志，x扩展标志，u未使用
 */
 type Packet struct {
-	Ver       Version     // 版本，4位
-	Proto     Protocol    // 协议，8位
-	AppProto  AppProtocol // 应用协议，8位
-	SourceTTL uint8       // 初始TTL，4位
-	TTL       uint8       // 生存时间，4位
-	SrcIP     net.IP      // 源IP地址，IPv4
-	DstIP     net.IP      // 目的IP地址，IPv4
-	Payload   []byte      // 数据体
+	Ver             Version     // 版本，4位
+	Proto           Protocol    // 协议，8位
+	AppProto        AppProtocol // 应用协议，8位
+	SourceTTL       uint8       // 初始TTL，4位
+	TTL             uint8       // 生存时间，4位
+	SrcIP           net.IP      // 源IP地址，IPv4
+	DstIP           net.IP      // 目的IP地址，IPv4
+	Payload         []byte      // 数据体
+	RouteNetworkKey string      // local-only routing key; not serialized on the wire
 }
 
 const (

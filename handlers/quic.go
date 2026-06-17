@@ -12,6 +12,7 @@ import (
 	"sdl-control/protocol"
 	"sdl-control/protocol/pb"
 	"sdl-control/util"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,7 +73,8 @@ func (s *sessionStream) close() error {
 type streamHub struct {
 	mu        sync.RWMutex
 	byIP      map[uint32]*sessionStream
-	ipsByAddr map[string]map[uint32]*sessionStream
+	byRoute   map[string]*sessionStream
+	ipsByAddr map[string]map[string]*sessionStream
 }
 
 var errStreamUnavailable = errors.New("stream unavailable")
@@ -122,28 +124,37 @@ func logPunchStartDispatch(prefix string, push *protocol.Packet, dispatchErr err
 func newStreamHub() *streamHub {
 	return &streamHub{
 		byIP:      make(map[uint32]*sessionStream),
-		ipsByAddr: make(map[string]map[uint32]*sessionStream),
+		byRoute:   make(map[string]*sessionStream),
+		ipsByAddr: make(map[string]map[string]*sessionStream),
 	}
 }
 
-func (h *streamHub) registerSession(remoteAddr net.Addr, virtualIP uint32, stream *sessionStream) {
+func routeKey(networkKey string, virtualIP uint32) string {
+	return strings.TrimSpace(networkKey) + "|" + strconv.FormatUint(uint64(virtualIP), 10)
+}
+
+func (h *streamHub) registerSession(remoteAddr net.Addr, networkKey string, virtualIP uint32, stream *sessionStream) {
 	if remoteAddr == nil || virtualIP == 0 {
 		return
 	}
 	addr := remoteAddr.String()
+	key := routeKey(networkKey, virtualIP)
 	var replaced *sessionStream
 	h.mu.Lock()
-	if previous, ok := h.byIP[virtualIP]; ok && previous != stream {
-		h.unregisterLocked(virtualIP, previous)
+	if previous, ok := h.byRoute[key]; ok && previous != stream {
+		h.unregisterLocked(key, previous)
 		replaced = previous
 	}
-	h.byIP[virtualIP] = stream
+	h.byRoute[key] = stream
+	if strings.TrimSpace(networkKey) == "" {
+		h.byIP[virtualIP] = stream
+	}
 	ips := h.ipsByAddr[addr]
 	if ips == nil {
-		ips = make(map[uint32]*sessionStream)
+		ips = make(map[string]*sessionStream)
 		h.ipsByAddr[addr] = ips
 	}
-	ips[virtualIP] = stream
+	ips[key] = stream
 	h.mu.Unlock()
 	if replaced != nil {
 		if closeErr := replaced.close(); closeErr != nil && !isExpectedSessionReadClose(closeErr) {
@@ -162,14 +173,20 @@ func (h *streamHub) unregisterSession(target *sessionStream) {
 	if !ok {
 		return
 	}
-	for ip, current := range ips {
+	for key, current := range ips {
 		if current != target {
 			continue
 		}
-		if mapped, ok := h.byIP[ip]; ok && mapped == target {
-			delete(h.byIP, ip)
+		if mapped, ok := h.byRoute[key]; ok && mapped == target {
+			delete(h.byRoute, key)
 		}
-		delete(ips, ip)
+		virtualIP, routeOK := routeIP(key)
+		if routeOK {
+			if mapped, ok := h.byIP[virtualIP]; ok && mapped == target {
+				delete(h.byIP, virtualIP)
+			}
+		}
+		delete(ips, key)
 	}
 	if len(ips) == 0 {
 		delete(h.ipsByAddr, target.remoteAddr)
@@ -177,23 +194,33 @@ func (h *streamHub) unregisterSession(target *sessionStream) {
 }
 
 func (h *streamHub) unregisterStaleIP(virtualIP uint32, target *sessionStream) {
+	h.unregisterStaleRoute("", virtualIP, target)
+}
+
+func (h *streamHub) unregisterStaleRoute(networkKey string, virtualIP uint32, target *sessionStream) {
 	if target == nil || target.remoteAddr == "" {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.unregisterLocked(virtualIP, target)
+	h.unregisterLocked(routeKey(networkKey, virtualIP), target)
 }
 
-func (h *streamHub) unregisterLocked(virtualIP uint32, target *sessionStream) {
-	current, ok := h.byIP[virtualIP]
+func (h *streamHub) unregisterLocked(key string, target *sessionStream) {
+	current, ok := h.byRoute[key]
 	if !ok || current != target {
 		return
 	}
-	delete(h.byIP, virtualIP)
+	delete(h.byRoute, key)
+	virtualIP, routeOK := routeIP(key)
+	if routeOK {
+		if mapped, ok := h.byIP[virtualIP]; ok && mapped == target {
+			delete(h.byIP, virtualIP)
+		}
+	}
 	if ips, ok := h.ipsByAddr[target.remoteAddr]; ok {
-		if mapped, ok := ips[virtualIP]; ok && mapped == target {
-			delete(ips, virtualIP)
+		if mapped, ok := ips[key]; ok && mapped == target {
+			delete(ips, key)
 		}
 		if len(ips) == 0 {
 			delete(h.ipsByAddr, target.remoteAddr)
@@ -217,6 +244,39 @@ func (h *streamHub) writeToIP(virtualIP uint32, payload []byte) error {
 		return fmt.Errorf("write stream %s: %w", target.remoteAddr, err)
 	}
 	return nil
+}
+
+func (h *streamHub) writeToRoute(networkKey string, virtualIP uint32, payload []byte) error {
+	if strings.TrimSpace(networkKey) == "" {
+		return h.writeToIP(virtualIP, payload)
+	}
+	h.mu.RLock()
+	target, ok := h.byRoute[routeKey(networkKey, virtualIP)]
+	h.mu.RUnlock()
+	if !ok {
+		return errStreamUnavailable
+	}
+	err := target.writeFramed(payload)
+	if err != nil {
+		h.unregisterSession(target)
+		if closeErr := target.close(); closeErr != nil && !isExpectedSessionReadClose(closeErr) {
+			log.Debugf("close broken session %s failed: %v", target.remoteAddr, closeErr)
+		}
+		return fmt.Errorf("write stream %s: %w", target.remoteAddr, err)
+	}
+	return nil
+}
+
+func routeIP(key string) (uint32, bool) {
+	_, ipText, ok := strings.Cut(key, "|")
+	if !ok {
+		return 0, false
+	}
+	ip, err := strconv.ParseUint(ipText, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(ip), true
 }
 
 var quicStreams = newStreamHub()
@@ -269,6 +329,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 
 	ctrl.TouchCipherSession(remoteAddr)
 	var sessionCapabilities []string
+	var sessionNetworkKey string
 	sessionWriter := &sessionStream{
 		remoteAddr: remoteAddr.String(),
 		rawWriter:  session,
@@ -312,6 +373,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				log.Printf("Unmarshal packet error: %v", err)
 				continue
 			}
+			packet.RouteNetworkKey = sessionNetworkKey
 			nowMs := time.Now().UnixMilli()
 			if nowMs-lastSweepMs >= 1000 {
 				ctrl.ReconcilePunchSessions(nowMs)
@@ -322,6 +384,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 				var respPacket *protocol.Packet
 				var err error
 				var virtualIP uint32
+				var networkIdentity control.NetworkIdentity
 				var deferredPushPackets []*protocol.Packet
 				if gatewayPushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChangeIfNeeded(); pushErr != nil {
 					log.Errorf("BuildPushDeviceListPacketsForGatewayChangeIfNeeded error: %v", pushErr)
@@ -344,7 +407,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						sessionCapabilities = append(sessionCapabilities[:0], handshakeResp.GetCapabilities()...)
 					}
 				case protocol.AppProtoRegistrationRequest:
-					respPacket, virtualIP, err = ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(packet, remoteAddr, sessionCapabilities)
+					respPacket, virtualIP, networkIdentity, err = ctrl.HandleRegistrationPacketWithVirtualIPAndCapabilities(packet, remoteAddr, sessionCapabilities)
 					if err != nil {
 						log.Errorf("HandleRegistrationPacket error: %v", err)
 						errPacket, packetErr := ctrl.BuildRegistrationErrorPacket(packet, err)
@@ -359,14 +422,15 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						}
 						continue
 					}
-					quicStreams.registerSession(remoteAddr, virtualIP, sessionWriter)
-					deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP)
+					sessionNetworkKey = networkIdentity.Key()
+					quicStreams.registerSession(remoteAddr, sessionNetworkKey, virtualIP, sessionWriter)
+					deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChangeInNetwork(sessionNetworkKey, virtualIP)
 					if err != nil {
 						log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", err)
 						deferredPushPackets = nil
 					}
 				case protocol.AppProtoPullDeviceList:
-					respPacket, err = ctrl.HandlePullDeviceListPacket(packet)
+					respPacket, err = ctrl.HandlePullDeviceListPacketInNetwork(packet, sessionNetworkKey)
 					if err != nil {
 						log.Errorf("HandlePullDeviceListPacket error: %v", err)
 						continue
@@ -395,7 +459,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						deferredPushPackets = append(deferredPushPackets, gatewayPushPackets...)
 					}
 				case protocol.AppProtoRefreshGatewayGrantRequest:
-					respPacket, err = ctrl.HandleRefreshGatewayGrantPacket(packet)
+					respPacket, err = ctrl.HandleRefreshGatewayGrantPacketInNetwork(packet, sessionNetworkKey)
 					if err != nil {
 						log.Errorf("HandleRefreshGatewayGrantPacket error: %v", err)
 						continue
@@ -413,33 +477,33 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						continue
 					}
 					if virtualIP != 0 {
-						deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP)
+						deferredPushPackets, err = ctrl.BuildPushDeviceListPacketsForPeerChangeInNetwork(sessionNetworkKey, virtualIP)
 						if err != nil {
 							log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", err)
 							deferredPushPackets = nil
 						}
 					}
 				case protocol.AppProtoClientStatusInfo:
-					changed, err := ctrl.HandleClientStatusInfoPacket(packet)
+					changed, err := ctrl.HandleClientStatusInfoPacketInNetwork(packet, sessionNetworkKey)
 					if err != nil {
 						log.Errorf("HandleClientStatusInfoPacket error: %v", err)
 					}
 					if changed {
 						virtualIP = ipToUint32(packet.SrcIP)
-						if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForPeerChange(virtualIP); pushErr != nil {
+						if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForPeerChangeInNetwork(sessionNetworkKey, virtualIP); pushErr != nil {
 							log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", pushErr)
 						} else {
 							for _, push := range pushPackets {
 								if push == nil || push.DstIP == nil {
 									continue
 								}
-								if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
+								if err := quicStreams.writeToRoute(push.RouteNetworkKey, ipToUint32(push.DstIP), push.Marshal()); err != nil {
 									log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
 								}
 							}
 						}
 					}
-					startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(packet)
+					startPackets, err := ctrl.BuildPunchStartPacketsFromStatusInNetwork(packet, sessionNetworkKey)
 					if err != nil {
 						log.Errorf("BuildPunchStartPacketsFromStatus error: %v", err)
 					} else {
@@ -450,7 +514,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 							if push == nil || push.DstIP == nil {
 								continue
 							}
-							if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
+							if err := quicStreams.writeToRoute(push.RouteNetworkKey, ipToUint32(push.DstIP), push.Marshal()); err != nil {
 								logPunchStartDispatch("status-triggered PunchStart dispatch failed", push, err)
 							} else {
 								logPunchStartDispatch("status-triggered PunchStart dispatched", push, nil)
@@ -483,12 +547,12 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 					}
 					continue
 				case protocol.AppProtoPunchRequest:
-					respPacket, err = ctrl.HandlePunchRequestPacket(packet)
+					respPacket, err = ctrl.HandlePunchRequestPacketInNetwork(packet, sessionNetworkKey)
 					if err != nil {
 						log.Errorf("HandlePunchRequestPacket error: %v", err)
 						continue
 					}
-					startPackets, err := ctrl.BuildPunchStartPackets(packet)
+					startPackets, err := ctrl.BuildPunchStartPacketsInNetwork(packet, sessionNetworkKey)
 					if err != nil {
 						log.Errorf("BuildPunchStartPackets error: %v", err)
 						continue
@@ -497,7 +561,7 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 						if push == nil || push.DstIP == nil {
 							continue
 						}
-						if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
+						if err := quicStreams.writeToRoute(push.RouteNetworkKey, ipToUint32(push.DstIP), push.Marshal()); err != nil {
 							logPunchStartDispatch("PunchStart dispatch failed", push, err)
 						} else {
 							logPunchStartDispatch("PunchStart dispatched", push, nil)
@@ -531,12 +595,12 @@ func serveControlSession(ctrl *control.Controller, remoteAddr net.Addr, session 
 					if push == nil || push.DstIP == nil {
 						continue
 					}
-					if err := quicStreams.writeToIP(ipToUint32(push.DstIP), push.Marshal()); err != nil {
+					if err := quicStreams.writeToRoute(push.RouteNetworkKey, ipToUint32(push.DstIP), push.Marshal()); err != nil {
 						log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
 					}
 				}
 			} else if packet.Proto == protocol.ProtocolControl {
-				respPacket, err := ctrl.HandleControlPacket(packet, remoteAddr)
+				respPacket, err := ctrl.HandleControlPacketInNetwork(packet, remoteAddr, sessionNetworkKey)
 				if err != nil {
 					log.Errorf("HandleControlPacket error: %v", err)
 					continue

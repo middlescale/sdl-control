@@ -118,10 +118,6 @@ func main() {
 		req = parseDevice(args[1:])
 	case "gateway":
 		req = parseGateway(args[1:])
-	case "approveDeviceRename", "approve_device_rename":
-		req = parseApproveDeviceRename(args[1:])
-	case "renameDevice", "rename_device":
-		req = parseRenameDevice(args[1:])
 	case "dnsDomains", "dns_domains":
 		req = parseDNSDomains(args[1:])
 	case "dnsSnapshot", "dns_snapshot":
@@ -193,10 +189,6 @@ func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) 
 			fmt.Fprintln(stdout)
 			writeDeviceTable(stdout, "Current devices", resp.Devices)
 		}
-	case "approve_device_rename":
-		writeKeyValueBlock(stdout, "Approved device rename", []kv{{Key: "Name", Value: valueOrDash(resp.Name)}})
-	case "rename_device":
-		writeKeyValueBlock(stdout, "Renamed device", []kv{{Key: "Name", Value: valueOrDash(resp.Name)}})
 	case "dns_domains":
 		writeDomains(stdout, resp.Domains)
 	case "dns_snapshot":
@@ -420,57 +412,6 @@ func parseGateway(args []string) adminRequest {
 	}
 }
 
-func parseApproveDeviceRename(args []string) adminRequest {
-	fs := flag.NewFlagSet("approveDeviceRename", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	var userID, group, deviceID string
-	fs.StringVar(&userID, "userId", "", "optional user id filter")
-	fs.StringVar(&userID, "u", "", "optional user id filter")
-	fs.StringVar(&group, "group", "", "optional group filter")
-	fs.StringVar(&group, "g", "", "optional group filter")
-	fs.StringVar(&deviceID, "deviceId", "", "device id")
-	fs.StringVar(&deviceID, "d", "", "device id")
-	if err := fs.Parse(args); err != nil {
-		fatalUsage()
-	}
-	if strings.TrimSpace(deviceID) == "" || fs.NArg() != 0 {
-		fatalUsage()
-	}
-	return adminRequest{
-		Action:   "approve_device_rename",
-		UserID:   strings.TrimSpace(userID),
-		Group:    strings.TrimSpace(group),
-		DeviceID: strings.TrimSpace(deviceID),
-	}
-}
-
-func parseRenameDevice(args []string) adminRequest {
-	fs := flag.NewFlagSet("renameDevice", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	var userID, group, deviceID, name string
-	fs.StringVar(&userID, "userId", "", "optional user id filter")
-	fs.StringVar(&userID, "u", "", "optional user id filter")
-	fs.StringVar(&group, "group", "", "optional group filter")
-	fs.StringVar(&group, "g", "", "optional group filter")
-	fs.StringVar(&deviceID, "deviceId", "", "device id")
-	fs.StringVar(&deviceID, "d", "", "device id")
-	fs.StringVar(&name, "name", "", "new device name")
-	fs.StringVar(&name, "n", "", "new device name")
-	if err := fs.Parse(args); err != nil {
-		fatalUsage()
-	}
-	if strings.TrimSpace(deviceID) == "" || strings.TrimSpace(name) == "" || fs.NArg() != 0 {
-		fatalUsage()
-	}
-	return adminRequest{
-		Action:   "rename_device",
-		UserID:   strings.TrimSpace(userID),
-		Group:    strings.TrimSpace(group),
-		DeviceID: strings.TrimSpace(deviceID),
-		Name:     strings.TrimSpace(name),
-	}
-}
-
 func parseDNSSnapshot(args []string) adminRequest {
 	fs := flag.NewFlagSet("dnsSnapshot", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -634,8 +575,6 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device issue-auth-ticket --id/-u u-1 [--group/-g default.ms.net] [--ttl-seconds/-t 300]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device extend-expiry --id/-u u-1 (--device-id/-d dev-1 | --all) [--group/-g sales.ms.net] [--ttl-seconds/-t 2592000]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --list")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] approveDeviceRename --deviceId/-d dev-1 [--group/-g sales.ms.net] [--userId/-u u-1]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] renameDevice --deviceId/-d dev-1 --name/-n new-name [--group/-g sales.ms.net] [--userId/-u u-1]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --enlist gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --delist gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsDomains")

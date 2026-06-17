@@ -78,7 +78,7 @@ func TestStreamHubWriteToIPRemovesStaleStreamOnWriteFailure(t *testing.T) {
 	hub := newStreamHub()
 	remoteAddr := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
 	writer := &failingWriteCloser{}
-	hub.registerSession(remoteAddr, 123, &sessionStream{
+	hub.registerSession(remoteAddr, "", 123, &sessionStream{
 		remoteAddr: remoteAddr.String(),
 		rawWriter:  writer,
 		rawCloser:  writer,
@@ -107,12 +107,12 @@ func TestStreamHubRegisterSessionPreservesClosableWriter(t *testing.T) {
 	oldWriter := &trackingWriteCloser{}
 	newWriter := &trackingWriteCloser{}
 
-	hub.registerSession(remoteAddr, 123, &sessionStream{
+	hub.registerSession(remoteAddr, "", 123, &sessionStream{
 		remoteAddr: remoteAddr.String(),
 		rawWriter:  oldWriter,
 		rawCloser:  oldWriter,
 	})
-	hub.registerSession(remoteAddr, 123, &sessionStream{
+	hub.registerSession(remoteAddr, "", 123, &sessionStream{
 		remoteAddr: remoteAddr.String(),
 		rawWriter:  newWriter,
 		rawCloser:  newWriter,
@@ -134,7 +134,7 @@ func TestSessionStreamSerializesDirectAndHubWrites(t *testing.T) {
 		remoteAddr: remoteAddr.String(),
 		rawWriter:  writer,
 	}
-	hub.registerSession(remoteAddr, 123, stream)
+	hub.registerSession(remoteAddr, "", 123, stream)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -186,8 +186,8 @@ func TestStreamHubUnregisterSessionKeepsReplacementOnSameRemoteAddr(t *testing.T
 	oldStream := &sessionStream{remoteAddr: remoteAddr.String(), rawWriter: oldWriter, rawCloser: oldWriter}
 	newStream := &sessionStream{remoteAddr: remoteAddr.String(), rawWriter: newWriter, rawCloser: newWriter}
 
-	hub.registerSession(remoteAddr, 123, oldStream)
-	hub.registerSession(remoteAddr, 123, newStream)
+	hub.registerSession(remoteAddr, "", 123, oldStream)
+	hub.registerSession(remoteAddr, "", 123, newStream)
 
 	if err := hub.writeToIP(123, []byte("payload")); err != nil {
 		t.Fatalf("expected replacement stream to stay registered, got %v", err)
@@ -215,8 +215,8 @@ func TestStreamHubUnregisterSessionKeepsReplacementAcrossRemoteAddrChange(t *tes
 	oldStream := &sessionStream{remoteAddr: oldRemoteAddr.String(), rawWriter: oldWriter, rawCloser: oldWriter}
 	newStream := &sessionStream{remoteAddr: newRemoteAddr.String(), rawWriter: newWriter, rawCloser: newWriter}
 
-	hub.registerSession(oldRemoteAddr, 123, oldStream)
-	hub.registerSession(newRemoteAddr, 123, newStream)
+	hub.registerSession(oldRemoteAddr, "", 123, oldStream)
+	hub.registerSession(newRemoteAddr, "", 123, newStream)
 
 	if err := hub.writeToIP(123, []byte("payload")); err != nil {
 		t.Fatalf("expected replacement stream to stay registered after addr change, got %v", err)
@@ -232,5 +232,34 @@ func TestStreamHubUnregisterSessionKeepsReplacementAcrossRemoteAddrChange(t *tes
 	}
 	if newWriter.closeCount.Load() != 0 {
 		t.Fatalf("expected replacement stream to stay open, got %d closes", newWriter.closeCount.Load())
+	}
+}
+
+func TestStreamHubRoutesSameIPByNetworkKey(t *testing.T) {
+	hub := newStreamHub()
+	remoteA := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 443}
+	remoteB := &net.UDPAddr{IP: net.ParseIP("2.2.2.2"), Port: 443}
+	writerA := &trackingWriteCloser{}
+	writerB := &trackingWriteCloser{}
+
+	hub.registerSession(remoteA, "personal:sdl-alpha@user.ms.net", 123, &sessionStream{
+		remoteAddr: remoteA.String(),
+		rawWriter:  writerA,
+		rawCloser:  writerA,
+	})
+	hub.registerSession(remoteB, "personal:sdl-beta@user.ms.net", 123, &sessionStream{
+		remoteAddr: remoteB.String(),
+		rawWriter:  writerB,
+		rawCloser:  writerB,
+	})
+
+	if err := hub.writeToRoute("personal:sdl-beta@user.ms.net", 123, []byte("payload")); err != nil {
+		t.Fatalf("writeToRoute failed: %v", err)
+	}
+	if writerA.Len() != 0 {
+		t.Fatalf("expected alpha writer to stay untouched, wrote %d bytes", writerA.Len())
+	}
+	if writerB.Len() == 0 {
+		t.Fatal("expected beta writer to receive framed payload")
 	}
 }

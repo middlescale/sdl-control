@@ -54,7 +54,7 @@ func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminRespon
 				if push == nil || push.DstIP == nil {
 					continue
 				}
-				if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+				if err := quicStreams.writeToRoute(push.RouteNetworkKey, util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
 					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
 				}
 			}
@@ -75,7 +75,7 @@ func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminRespon
 				if push == nil || push.DstIP == nil {
 					continue
 				}
-				if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+				if err := quicStreams.writeToRoute(push.RouteNetworkKey, util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
 					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
 				}
 			}
@@ -115,29 +115,6 @@ func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminRespon
 			UpdatedDevices: selectUpdatedDeviceViews(updated, devices),
 			UpdatedCount:   len(updated),
 		}
-	case "approve_device_rename":
-		appliedName, changedIP, err := ctrl.ApprovePendingDeviceRename(
-			strings.TrimSpace(req.DeviceID),
-			strings.TrimSpace(req.UserID),
-			strings.TrimSpace(req.Group),
-		)
-		if err != nil {
-			return adminResponse{OK: false, Error: err.Error()}
-		}
-		notifyRename(ctrl, changedIP, appliedName)
-		return adminResponse{OK: true, Name: appliedName}
-	case "rename_device":
-		appliedName, changedIP, err := ctrl.RenameDeviceByAdmin(
-			strings.TrimSpace(req.DeviceID),
-			strings.TrimSpace(req.UserID),
-			strings.TrimSpace(req.Group),
-			strings.TrimSpace(req.Name),
-		)
-		if err != nil {
-			return adminResponse{OK: false, Error: err.Error()}
-		}
-		notifyRename(ctrl, changedIP, appliedName)
-		return adminResponse{OK: true, Name: appliedName}
 	case "dns_domains":
 		return adminResponse{OK: true, Domains: ctrl.ListDNSDomains()}
 	case "dns_snapshot":
@@ -161,7 +138,7 @@ func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminRespon
 		if err != nil {
 			return adminResponse{OK: false, Error: err.Error()}
 		}
-		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
+		if err := quicStreams.writeToRoute(packet.RouteNetworkKey, targetIP, packet.Marshal()); err != nil {
 			ctrl.CancelDebugCollect(requestID)
 			return adminResponse{OK: false, Error: err.Error()}
 		}
@@ -196,7 +173,7 @@ func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminRespon
 		if err != nil {
 			return adminResponse{OK: false, Error: err.Error()}
 		}
-		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
+		if err := quicStreams.writeToRoute(packet.RouteNetworkKey, targetIP, packet.Marshal()); err != nil {
 			ctrl.CancelDebugWatchStart(requestID)
 			return adminResponse{OK: false, Error: err.Error()}
 		}
@@ -218,7 +195,7 @@ func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminRespon
 		if err != nil {
 			return adminResponse{OK: false, Error: err.Error()}
 		}
-		if err := quicStreams.writeToIP(targetIP, packet.Marshal()); err != nil {
+		if err := quicStreams.writeToRoute(packet.RouteNetworkKey, targetIP, packet.Marshal()); err != nil {
 			ctrl.CancelDebugWatchStop(requestID)
 			return adminResponse{OK: false, Error: err.Error()}
 		}
@@ -229,30 +206,5 @@ func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminRespon
 		return adminResponse{OK: true, DebugWatchID: result.WatchID, DebugPath: result.SavedPath}
 	default:
 		return adminResponse{OK: false, Error: "unsupported action"}
-	}
-}
-
-func notifyRename(ctrl *control.Controller, changedIP uint32, appliedName string) {
-	if changedIP == 0 {
-		return
-	}
-	if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForPeerChange(changedIP); pushErr != nil {
-		log.Errorf("BuildPushDeviceListPacketsForPeerChange error: %v", pushErr)
-	} else {
-		for _, push := range pushPackets {
-			if push == nil || push.DstIP == nil {
-				continue
-			}
-			if err := quicStreams.writeToIP(util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
-				log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
-			}
-		}
-	}
-	if notifyPacket, notifyErr := ctrl.BuildDeviceRenameNotifyPacket(changedIP, 0, appliedName); notifyErr != nil {
-		log.Errorf("BuildDeviceRenameNotifyPacket error: %v", notifyErr)
-	} else if notifyPacket != nil {
-		if err := quicStreams.writeToIP(changedIP, notifyPacket.Marshal()); err != nil {
-			log.Warnf("DeviceRenameResponse dispatch failed: %s err=%v", util.Uint32ToIP(changedIP), err)
-		}
 	}
 }

@@ -3,7 +3,74 @@ package control
 import (
 	"net"
 	"sdl-control/protocol/pb"
+	"strings"
 )
+
+const (
+	personalNetworkPrefix = "personal:"
+	groupNetworkPrefix    = "group:"
+	personalUserIDPrefix  = "sdl-"
+)
+
+type NetworkIdentity struct {
+	key       string
+	authGroup string
+	scope     string
+}
+
+func NewNetworkIdentity(authGroup, userID string) NetworkIdentity {
+	authGroup = strings.TrimSpace(authGroup)
+	userID = strings.TrimSpace(userID)
+	if isPersonalSDLUser(userID) {
+		scope := personalNetworkPrefix + userID
+		return NetworkIdentity{
+			key:       scope + "@" + authGroup,
+			authGroup: authGroup,
+			scope:     scope,
+		}
+	}
+	return NetworkIdentity{
+		key:       authGroup,
+		authGroup: authGroup,
+		scope:     groupNetworkPrefix + authGroup,
+	}
+}
+
+func NetworkIdentityFromClient(client ClientInfo, fallbackNetworkKey string) NetworkIdentity {
+	authGroup := strings.TrimSpace(client.AuthGroup)
+	if authGroup == "" {
+		authGroup = strings.TrimSpace(fallbackNetworkKey)
+	}
+	key := strings.TrimSpace(client.NetworkKey)
+	if key == "" {
+		key = strings.TrimSpace(fallbackNetworkKey)
+	}
+	scope := strings.TrimSpace(client.NetworkScope)
+	if scope == "" {
+		scope = NewNetworkIdentity(authGroup, client.UserID).Scope()
+	}
+	return NetworkIdentity{
+		key:       key,
+		authGroup: authGroup,
+		scope:     scope,
+	}
+}
+
+func (n NetworkIdentity) Key() string {
+	return n.key
+}
+
+func (n NetworkIdentity) AuthGroup() string {
+	return n.authGroup
+}
+
+func (n NetworkIdentity) Scope() string {
+	return n.scope
+}
+
+func (n NetworkIdentity) IsZero() bool {
+	return strings.TrimSpace(n.key) == ""
+}
 
 type NetworkInfo struct {
 	Group               string
@@ -64,6 +131,10 @@ func (n *NetworkInfo) FindClientIPByDeviceID(deviceID string) uint32 {
 type ClientInfo struct {
 	DeviceId           string
 	Name               string
+	UserID             string
+	NetworkKey         string
+	AuthGroup          string
+	NetworkScope       string
 	ControlOnline      bool
 	ControlLastSeen    int64 // Unix时间戳 (timestamp)
 	DataPlaneReachable bool
@@ -79,7 +150,7 @@ type ClientInfo struct {
 
 	LastJoin int64 // Unix时间戳 (timestamp)
 
-	ClientStatus *ClientStatusInfo // 只有 DataPlaneReachable 时才有值
+	ClientStatus         *ClientStatusInfo // 只有 DataPlaneReachable 时才有值
 	PreferredChannelMode pb.ChannelMode
 }
 

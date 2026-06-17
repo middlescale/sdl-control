@@ -117,6 +117,9 @@ func (c *Controller) BuildDNSSnapshot(domain, group string) (*DNSSnapshotView, e
 			continue
 		}
 		for ip, client := range network.Clients {
+			if strings.HasPrefix(clientNetworkScope(client, scope.runtimeGroup), personalNetworkPrefix) {
+				continue
+			}
 			name := strings.ToLower(strings.TrimSpace(client.Name))
 			if name == "" {
 				name = strings.ToLower(strings.TrimSpace(client.DeviceId))

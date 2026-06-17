@@ -214,6 +214,8 @@ Authorization: Bearer <ADMIN_HTTP_TOKEN>
 
 说明：`user create` 里的 `--group` 不传时默认是 `default`（最终会落成默认域名下的 `default.<domain>`）。`--group` 可传短名（如 `sales`，会自动补全为用户所属域名下的 `sales.<user-domain>`）；若传 FQDN（如 `sales.ms.net`），会校验其必须属于该用户所属域名。`user list` 列出全部用户；数据库模式下还会关联 `sdl-www` 用户资料显示 OAuth name 和 email。`--id/-u` 对 user ID 做大小写敏感的整串通配符匹配；`--name/-n` 不区分大小写，无通配符时按包含关系匹配，因此 `--name huang` 可以命中 `patrick huang`。两者都支持 `*` 匹配任意数量字符、`?` 匹配单个字符，并且可以同时使用。`device issue-auth-ticket` 里的 `--group` 可省略，默认是 `default.ms.net`；`--ttl-seconds` 也可省略，默认是 `300`。`device list` 会列出该用户下**全部已授权设备**，包括当前离线设备，并带上认证过期时间。`device extend-expiry` 用于把某个设备或该用户下全部设备的认证过期时间往后顺延；不传 `--group` 时可跨组列设备，但延长单设备时如果同一个 `device_id` 命中多个组，需要补 `--group` 消歧。
 
+客户端也可以通过 `sdl rename <name>` 自助改名。control 会立即保存新的显示名，但当前运行中的 `sdl-service` 仍会使用启动时的 runtime name，因此客户端会提示重启服务后完全生效；integration 的 `device-rename` 场景会验证这个流程。
+
 `collectDebug` 会按在线设备 `name` 定位目标节点，由 control 下发调试采集请求，节点把结构化 JSON snapshot 回传给 control，再由 `sdl-admin` 直接打印。当前实现是**同步等待返回**；成功后 control 会先把 snapshot 落盘，再把保存路径返回给 `sdl-admin`。当前支持的 section 包括：`runtime`、`gateway`、`peers`、`routes`、`nat`、`traffic`；不传 `--sections` 时默认采集全部。默认落盘目录为 `./data/debug-collect`，每个节点默认保留最近 `20` 份，同时更新同目录下的 `latest.json`。
 
 `startDebugWatch` / `stopDebugWatch` 用于**异步调试观察**：control 按 `name` 启动一个限时 watch，会话期间 SDL 会把关键事件流持续回推到 control，control 将其追加写入该 watch 目录下的 `events.jsonl`。当前已接入的事件重点覆盖 Win10 dataplane 排查需要的路径：`gateway`（connect hello / auth result）、`icmp`（tun 出站、gateway/peer EchoReply 收包与回注）、`punch`（start / watchdog outcome）、`route`（direct route 失效触发 repunch）、`runtime`（watch started）。这条能力当前是**结构化事件流**，不是把客户端全部本地日志原样转发到 control。

@@ -27,7 +27,7 @@ type DebugCollectResult struct {
 }
 
 func (c *Controller) PrepareDebugCollectByName(name, userID, group string, sections []string) (*protocol.Packet, uint32, uint64, error) {
-	match, ip, err := c.findOnlineDeviceByName(name, userID, group)
+	match, ip, networkKey, err := c.findOnlineDeviceByName(name, userID, group)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -43,14 +43,15 @@ func (c *Controller) PrepareDebugCollectByName(name, userID, group string, secti
 		return nil, 0, 0, err
 	}
 	packet := &protocol.Packet{
-		Ver:       protocol.V3,
-		Proto:     protocol.ProtocolService,
-		AppProto:  protocol.AppProtoDebugCollectRequest,
-		SourceTTL: protocol.MAX_TTL,
-		TTL:       protocol.MAX_TTL,
-		SrcIP:     net.ParseIP("0.0.0.1"),
-		DstIP:     util.Uint32ToIP(ip),
-		Payload:   payload,
+		Ver:             protocol.V3,
+		Proto:           protocol.ProtocolService,
+		AppProto:        protocol.AppProtoDebugCollectRequest,
+		SourceTTL:       protocol.MAX_TTL,
+		TTL:             protocol.MAX_TTL,
+		SrcIP:           net.ParseIP("0.0.0.1"),
+		DstIP:           util.Uint32ToIP(ip),
+		Payload:         payload,
+		RouteNetworkKey: networkKey,
 	}
 	_ = match
 	return packet, ip, requestID, nil
@@ -136,11 +137,14 @@ func (c *Controller) decorateDebugCollectResult(packet *protocol.Packet, resp *p
 		if !ok {
 			continue
 		}
-		result.Group = network.Group
+		authGroup := clientAuthGroup(client, network.Group)
+		result.Group = authGroup
 		result.Name = client.Name
 		result.DeviceID = client.DeviceId
 		result.VirtualIP = util.Uint32ToIP(ip).String()
-		if userID, ok := c.userIDForAuthedDevice(network.Group, client.DeviceId); ok {
+		if userID := strings.TrimSpace(client.UserID); userID != "" {
+			result.UserID = userID
+		} else if userID, ok := c.userIDForAuthedDevice(authGroup, client.DeviceId); ok {
 			result.UserID = userID
 		}
 		return result
@@ -148,37 +152,43 @@ func (c *Controller) decorateDebugCollectResult(packet *protocol.Packet, resp *p
 	return result
 }
 
-func (c *Controller) findOnlineDeviceByName(name, userID, group string) (DeviceAdminView, uint32, error) {
+func (c *Controller) findOnlineDeviceByName(name, userID, group string) (DeviceAdminView, uint32, string, error) {
 	name = strings.TrimSpace(name)
 	userID = strings.TrimSpace(userID)
 	group = strings.TrimSpace(group)
 	if name == "" {
-		return DeviceAdminView{}, 0, fmt.Errorf("name required")
+		return DeviceAdminView{}, 0, "", fmt.Errorf("name required")
 	}
 	type match struct {
-		view DeviceAdminView
-		ip   uint32
+		view       DeviceAdminView
+		ip         uint32
+		networkKey string
 	}
 	var matches []match
 	c.nc.VirtualNetwork.mutex.RLock()
 	defer c.nc.VirtualNetwork.mutex.RUnlock()
 	for _, network := range c.nc.VirtualNetwork.data {
-		if group != "" && !strings.EqualFold(network.Group, group) {
-			continue
-		}
 		for ip, client := range network.Clients {
+			authGroup := clientAuthGroup(client, network.Group)
+			if group != "" && !strings.EqualFold(authGroup, group) {
+				continue
+			}
 			if !client.ControlOnline || !strings.EqualFold(strings.TrimSpace(client.Name), name) {
 				continue
 			}
-			recordUserID, _ := c.userIDForAuthedDevice(network.Group, client.DeviceId)
+			recordUserID := strings.TrimSpace(client.UserID)
+			if recordUserID == "" {
+				recordUserID, _ = c.userIDForAuthedDevice(authGroup, client.DeviceId)
+			}
 			if userID != "" && !strings.EqualFold(recordUserID, userID) {
 				continue
 			}
 			matches = append(matches, match{
-				ip: ip,
+				ip:         ip,
+				networkKey: clientNetworkKey(client, network.Group),
 				view: DeviceAdminView{
 					UserID:             recordUserID,
-					Group:              network.Group,
+					Group:              authGroup,
 					Name:               client.Name,
 					DeviceID:           client.DeviceId,
 					VirtualIP:          util.Uint32ToIP(ip).String(),
@@ -189,7 +199,7 @@ func (c *Controller) findOnlineDeviceByName(name, userID, group string) (DeviceA
 		}
 	}
 	if len(matches) == 0 {
-		return DeviceAdminView{}, 0, fmt.Errorf("no online device matched name %q", name)
+		return DeviceAdminView{}, 0, "", fmt.Errorf("no online device matched name %q", name)
 	}
 	if len(matches) > 1 {
 		sort.Slice(matches, func(i, j int) bool {
@@ -205,9 +215,9 @@ func (c *Controller) findOnlineDeviceByName(name, userID, group string) (DeviceA
 		for _, item := range matches {
 			items = append(items, fmt.Sprintf("%s/%s/%s", item.view.UserID, item.view.Group, item.view.DeviceID))
 		}
-		return DeviceAdminView{}, 0, fmt.Errorf("name %q matched multiple online devices: %s", name, strings.Join(items, ", "))
+		return DeviceAdminView{}, 0, "", fmt.Errorf("name %q matched multiple online devices: %s", name, strings.Join(items, ", "))
 	}
-	return matches[0].view, matches[0].ip, nil
+	return matches[0].view, matches[0].ip, matches[0].networkKey, nil
 }
 
 func (c *Controller) userIDForAuthedDevice(groupName, deviceID string) (string, bool) {

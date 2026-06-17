@@ -649,6 +649,18 @@ func (m *UserManager) SetAuthedDeviceDisplayName(
 	if !ok {
 		return fmt.Errorf("authed device not found")
 	}
+	networkKey := NewNetworkIdentity(record.GroupName, record.UserID).Key()
+	for _, existing := range m.authedDevices {
+		if existing.DeviceID == deviceID {
+			continue
+		}
+		if NewNetworkIdentity(existing.GroupName, existing.UserID).Key() != networkKey {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(existing.DisplayName), displayName) {
+			return fmt.Errorf("display name already exists")
+		}
+	}
 	record.DisplayName = displayName
 	m.authedDevices[key] = record
 	if err := m.saveLocked(); err != nil {

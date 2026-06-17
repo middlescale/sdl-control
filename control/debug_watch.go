@@ -44,7 +44,7 @@ func (c *Controller) PrepareDebugWatchStartByName(
 	sections []string,
 	duration time.Duration,
 ) (*protocol.Packet, uint32, uint64, error) {
-	match, ip, err := c.findOnlineDeviceByName(name, userID, group)
+	match, ip, networkKey, err := c.findOnlineDeviceByName(name, userID, group)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -65,14 +65,15 @@ func (c *Controller) PrepareDebugWatchStartByName(
 		return nil, 0, 0, err
 	}
 	packet := &protocol.Packet{
-		Ver:       protocol.V3,
-		Proto:     protocol.ProtocolService,
-		AppProto:  protocol.AppProtoDebugWatchStartRequest,
-		SourceTTL: protocol.MAX_TTL,
-		TTL:       protocol.MAX_TTL,
-		SrcIP:     net.ParseIP("0.0.0.1"),
-		DstIP:     util.Uint32ToIP(ip),
-		Payload:   payload,
+		Ver:             protocol.V3,
+		Proto:           protocol.ProtocolService,
+		AppProto:        protocol.AppProtoDebugWatchStartRequest,
+		SourceTTL:       protocol.MAX_TTL,
+		TTL:             protocol.MAX_TTL,
+		SrcIP:           net.ParseIP("0.0.0.1"),
+		DstIP:           util.Uint32ToIP(ip),
+		Payload:         payload,
+		RouteNetworkKey: networkKey,
 	}
 	_ = match
 	return packet, ip, requestID, nil
@@ -98,7 +99,7 @@ func (c *Controller) AwaitDebugWatchStart(requestID uint64, timeout time.Duratio
 }
 
 func (c *Controller) PrepareDebugWatchStopByName(name, userID, group string) (*protocol.Packet, uint32, uint64, error) {
-	match, ip, err := c.findOnlineDeviceByName(name, userID, group)
+	match, ip, networkKey, err := c.findOnlineDeviceByName(name, userID, group)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -115,14 +116,15 @@ func (c *Controller) PrepareDebugWatchStopByName(name, userID, group string) (*p
 		return nil, 0, 0, err
 	}
 	packet := &protocol.Packet{
-		Ver:       protocol.V3,
-		Proto:     protocol.ProtocolService,
-		AppProto:  protocol.AppProtoDebugWatchStopRequest,
-		SourceTTL: protocol.MAX_TTL,
-		TTL:       protocol.MAX_TTL,
-		SrcIP:     net.ParseIP("0.0.0.1"),
-		DstIP:     util.Uint32ToIP(ip),
-		Payload:   payload,
+		Ver:             protocol.V3,
+		Proto:           protocol.ProtocolService,
+		AppProto:        protocol.AppProtoDebugWatchStopRequest,
+		SourceTTL:       protocol.MAX_TTL,
+		TTL:             protocol.MAX_TTL,
+		SrcIP:           net.ParseIP("0.0.0.1"),
+		DstIP:           util.Uint32ToIP(ip),
+		Payload:         payload,
+		RouteNetworkKey: networkKey,
 	}
 	return packet, ip, requestID, nil
 }
@@ -295,11 +297,14 @@ func (c *Controller) decorateDebugWatchIdentity(result DebugWatchStartResult, pa
 		if !ok {
 			continue
 		}
-		result.Group = network.Group
+		authGroup := clientAuthGroup(client, network.Group)
+		result.Group = authGroup
 		result.Name = client.Name
 		result.DeviceID = client.DeviceId
 		result.VirtualIP = util.Uint32ToIP(ip).String()
-		if userID, ok := c.userIDForAuthedDevice(network.Group, client.DeviceId); ok {
+		if userID := strings.TrimSpace(client.UserID); userID != "" {
+			result.UserID = userID
+		} else if userID, ok := c.userIDForAuthedDevice(authGroup, client.DeviceId); ok {
 			result.UserID = userID
 		}
 		return result
