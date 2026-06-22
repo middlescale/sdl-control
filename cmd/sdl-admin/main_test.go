@@ -78,6 +78,17 @@ func TestParseGatewayDelist(t *testing.T) {
 	}
 }
 
+func TestWriteResponseVersion(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if err := writeResponse(&stdout, &stderr, "version", adminResponse{OK: true, Version: "0.7.3-test"}); err != nil {
+		t.Fatalf("writeResponse failed: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "0.7.3-test" {
+		t.Fatalf("unexpected version output: %q", got)
+	}
+}
+
 func TestWriteResponseExtendDeviceExpiryShowsSummaryAndUpdatedDevices(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

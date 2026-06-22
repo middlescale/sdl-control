@@ -45,6 +45,7 @@ type adminRequest struct {
 
 type adminResponse struct {
 	OK             bool            `json:"ok"`
+	Version        string          `json:"version,omitempty"`
 	UserID         string          `json:"user_id,omitempty"`
 	Name           string          `json:"name,omitempty"`
 	Domain         string          `json:"domain,omitempty"`
@@ -112,6 +113,11 @@ func main() {
 
 	var req adminRequest
 	switch args[0] {
+	case "version":
+		if len(args) != 1 {
+			fatalUsage()
+		}
+		req = adminRequest{Action: "version"}
 	case "user":
 		req = parseUser(args[1:])
 	case "device":
@@ -155,6 +161,8 @@ func main() {
 
 func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) error {
 	switch action {
+	case "version":
+		fmt.Fprintln(stdout, valueOrDash(resp.Version))
 	case "create_user":
 		writeKeyValueBlock(stdout, "Created user", []kv{
 			{Key: "User ID", Value: valueOrDash(resp.UserID)},
@@ -569,6 +577,7 @@ func call(socket string, req adminRequest) adminResponse {
 
 func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] version")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user create --id/-u user1 [--group/-g sales.ms.net]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] user list [--id/-u 'user-*'] [--name/-n huang]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device list --id/-u u-1")

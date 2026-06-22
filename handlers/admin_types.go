@@ -27,6 +27,7 @@ type adminRequest struct {
 
 type adminResponse struct {
 	OK             bool                       `json:"ok"`
+	Version        string                     `json:"version,omitempty"`
 	UserID         string                     `json:"user_id,omitempty"`
 	SdlUserID      string                     `json:"sdl_user_id,omitempty"`
 	Name           string                     `json:"name,omitempty"`

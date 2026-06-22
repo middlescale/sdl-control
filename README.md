@@ -180,6 +180,8 @@ Requirements:
 Examples:
 
 ```bash
+./sdl-admin version
+
 ./sdl-admin user create --id user1 --group sales.ms.net
 ./sdl-admin user create -u user1
 ./sdl-admin user list

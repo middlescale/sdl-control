@@ -36,7 +36,7 @@ func TestAdminHTTPListDevices(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/admin/v1/list_devices?user_id="+user.UserID, nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	rr := httptest.NewRecorder()
-	adminHTTPAuth("secret", adminHTTPHandler(ctrl)).ServeHTTP(rr, req)
+	adminHTTPAuth("secret", adminHTTPHandler(ctrl, "test-version")).ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rr.Code)
 	}
@@ -55,7 +55,7 @@ func TestAdminHTTPListUsersWithIDFilter(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/v1/list_users?id=sdl-%3Feta", nil)
 	rec := httptest.NewRecorder()
-	adminHTTPHandler(ctrl).ServeHTTP(rec, req)
+	adminHTTPHandler(ctrl, "test-version").ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
 	}
@@ -64,6 +64,22 @@ func TestAdminHTTPListUsersWithIDFilter(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if !resp.OK || len(resp.Users) != 1 || resp.Users[0].UserID != "sdl-beta" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestAdminHTTPVersion(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/admin/v1/version", nil)
+	rec := httptest.NewRecorder()
+	adminHTTPHandler(nil, "0.7.3-test").ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp adminResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.OK || resp.Version != "0.7.3-test" {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
 }

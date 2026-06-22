@@ -6,6 +6,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 ARG GOPROXY=https://proxy.golang.org,direct
 ARG GOSUMDB=sum.golang.org
+ARG VERSION=dev
 ENV GOPROXY=${GOPROXY}
 ENV GOSUMDB=${GOSUMDB}
 WORKDIR /src
@@ -13,7 +14,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # Build static-like binary for the requested target platform.
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags='-s -w' -o /out/sdl-control ./
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w -X main.Version=${VERSION}" -o /out/sdl-control ./
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags='-s -w' -o /out/sdl-admin ./cmd/sdl-admin
 
 # Final stage

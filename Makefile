@@ -1,5 +1,6 @@
 APP_NAME=sdl-control
 ADMIN_APP_NAME=sdl-admin
+VERSION ?= dev
 GO_FILES=$(shell find . -name '*.go' -not -path "./vendor/*")
 PROTO_DIR=proto
 PROTO_FILES=$(wildcard $(PROTO_DIR)/*.proto)
@@ -10,7 +11,7 @@ GEN_GO_DIR=protocol/pb
 all: build
 
 build:
-	go build -o $(APP_NAME) main.go
+	go build -ldflags "-X main.Version=$(VERSION)" -o $(APP_NAME) main.go
 	go build -o $(ADMIN_APP_NAME) ./cmd/sdl-admin
 
 run:

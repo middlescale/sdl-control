@@ -11,8 +11,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func executeAdminRequest(ctrl *control.Controller, req adminRequest) adminResponse {
+func executeAdminRequest(ctrl *control.Controller, version string, req adminRequest) adminResponse {
 	switch req.Action {
+	case "version":
+		return adminResponse{OK: true, Version: strings.TrimSpace(version)}
 	case "create_user":
 		user, err := ctrl.UMCreateUserWithID(strings.TrimSpace(req.UserID), strings.TrimSpace(req.Group), strings.TrimSpace(req.Domain))
 		if err != nil {

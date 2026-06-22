@@ -14,7 +14,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func StartAdminUnixServer(ctx context.Context, ctrl *control.Controller, socketPath string) error {
+func StartAdminUnixServer(ctx context.Context, ctrl *control.Controller, socketPath string, version string) error {
 	if strings.TrimSpace(socketPath) == "" {
 		return nil
 	}
@@ -39,13 +39,13 @@ func StartAdminUnixServer(ctx context.Context, ctrl *control.Controller, socketP
 			if err != nil {
 				return
 			}
-			go handleAdminConn(ctrl, conn)
+			go handleAdminConn(ctrl, version, conn)
 		}
 	}()
 	return nil
 }
 
-func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
+func handleAdminConn(ctrl *control.Controller, version string, conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 	line, err := reader.ReadBytes('\n')
@@ -58,7 +58,7 @@ func handleAdminConn(ctrl *control.Controller, conn net.Conn) {
 		_ = json.NewEncoder(conn).Encode(adminResponse{OK: false, Error: "invalid json"})
 		return
 	}
-	_ = json.NewEncoder(conn).Encode(executeAdminRequest(ctrl, req))
+	_ = json.NewEncoder(conn).Encode(executeAdminRequest(ctrl, version, req))
 }
 
 func selectUpdatedDeviceViews(updated []control.UMAuthDevice, devices []control.DeviceAdminView) []control.DeviceAdminView {

@@ -57,7 +57,8 @@ jobs:
           file: ./Dockerfile.server
           platforms: linux/amd64
           push: true
+          build-args: |
+            VERSION=${{ steps.vars.outputs.release_tag }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.release_tag }}
             ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-

@@ -14,13 +14,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func StartAdminHTTPServer(ctx context.Context, ctrl *control.Controller, addr string, token string) error {
+func StartAdminHTTPServer(ctx context.Context, ctrl *control.Controller, addr string, token string, version string) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("admin http listen %s: %w", addr, err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/admin/v1/", adminHTTPAuth(token, adminHTTPHandler(ctrl)))
+	mux.Handle("/admin/v1/", adminHTTPAuth(token, adminHTTPHandler(ctrl, version)))
 	server := &http.Server{
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -61,9 +61,10 @@ var adminReadActions = map[string]bool{
 	"list_users":   true,
 	"dns_domains":  true,
 	"dns_snapshot": true,
+	"version":      true,
 }
 
-func adminHTTPHandler(ctrl *control.Controller) http.Handler {
+func adminHTTPHandler(ctrl *control.Controller, version string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost && r.Method != http.MethodGet {
 			writeAdminHTTPJSON(w, http.StatusMethodNotAllowed, adminResponse{OK: false, Error: "method not allowed"})
@@ -80,7 +81,7 @@ func adminHTTPHandler(ctrl *control.Controller) http.Handler {
 			writeAdminHTTPJSON(w, http.StatusBadRequest, adminResponse{OK: false, Error: err.Error()})
 			return
 		}
-		writeAdminHTTPJSON(w, http.StatusOK, executeAdminRequest(ctrl, req))
+		writeAdminHTTPJSON(w, http.StatusOK, executeAdminRequest(ctrl, version, req))
 	})
 }
 

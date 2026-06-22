@@ -32,7 +32,8 @@ func main() {
 		level = log.InfoLevel // 默认 info
 	}
 	log.SetLevel(level)
-	log.Infof("sdl-control starting version=%s", buildVersion())
+	version := buildVersion()
+	log.Infof("sdl-control starting version=%s", version)
 
 	// support overriding config path via CONFIG_PATH env (useful in docker-compose / CI)
 	cfgPath := os.Getenv("CONFIG_PATH")
@@ -178,7 +179,7 @@ func main() {
 	}
 
 	adminSocket := firstNonEmpty(os.Getenv("ADMIN_SOCKET_PATH"), "/tmp/sdl-control-admin.sock")
-	if err := handlers.StartAdminUnixServer(ctx, ctrl, adminSocket); err != nil {
+	if err := handlers.StartAdminUnixServer(ctx, ctrl, adminSocket, version); err != nil {
 		log.Fatalf("start admin unix socket failed: %v", err)
 	}
 	adminHTTPAddr := firstNonEmpty(os.Getenv("ADMIN_HTTP_ADDR"), cfg.AdminHTTPAddr)
@@ -187,7 +188,7 @@ func main() {
 		if strings.TrimSpace(adminHTTPToken) == "" {
 			log.Fatalf("ADMIN_HTTP_TOKEN/admin_http_token is required when admin_http_addr is enabled")
 		}
-		if err := handlers.StartAdminHTTPServer(ctx, ctrl, adminHTTPAddr, adminHTTPToken); err != nil {
+		if err := handlers.StartAdminHTTPServer(ctx, ctrl, adminHTTPAddr, adminHTTPToken, version); err != nil {
 			log.Fatalf("start admin http server failed: %v", err)
 		}
 	}
