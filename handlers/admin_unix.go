@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"sdl-control/control"
@@ -28,15 +29,31 @@ func StartAdminUnixServer(ctx context.Context, ctrl *control.Controller, socketP
 		return err
 	}
 	log.Infof("admin unix socket listening on %s", socketPath)
+	var closeOnce sync.Once
+	closeListener := func() {
+		closeOnce.Do(func() {
+			_ = ln.Close()
+			_ = os.Remove(socketPath)
+		})
+	}
 	go func() {
 		<-ctx.Done()
-		_ = ln.Close()
-		_ = os.Remove(socketPath)
+		closeListener()
 	}()
 	go func() {
+		defer closeListener()
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+					log.Warnf("admin unix socket temporary accept error: %v", err)
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				log.Errorf("admin unix socket accept loop stopped: %v", err)
 				return
 			}
 			go handleAdminConn(ctrl, version, conn)

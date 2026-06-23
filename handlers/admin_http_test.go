@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -77,6 +78,30 @@ func TestAdminHTTPVersion(t *testing.T) {
 	}
 	var resp adminResponse
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.OK || resp.Version != "0.7.3-test" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestAdminUnixVersion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	socketPath := filepath.Join(t.TempDir(), "admin.sock")
+	if err := StartAdminUnixServer(ctx, nil, socketPath, "0.7.3-test"); err != nil {
+		t.Fatalf("start admin unix server: %v", err)
+	}
+	conn, err := net.DialTimeout("unix", socketPath, time.Second)
+	if err != nil {
+		t.Fatalf("dial admin unix socket: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte(`{"action":"version"}` + "\n")); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	var resp adminResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if !resp.OK || resp.Version != "0.7.3-test" {
