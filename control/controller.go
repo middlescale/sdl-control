@@ -438,6 +438,13 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 	if !ok {
 		return nil, 0, NetworkIdentity{}, fmt.Errorf("device %s auth record missing for group %s", registration.GetDeviceId(), authGroup)
 	}
+	if strings.TrimSpace(authRecord.DisplayName) == "" {
+		assignedRecord, err := c.UMAssignAuthedDeviceDisplayName(authGroup, registration.GetDeviceId(), displayName)
+		if err != nil {
+			return nil, 0, NetworkIdentity{}, err
+		}
+		authRecord = assignedRecord
+	}
 	if persisted := strings.TrimSpace(authRecord.DisplayName); persisted != "" {
 		displayName = persisted
 	}
@@ -677,6 +684,61 @@ func (c *Controller) clearStaleClientStateByDeviceID(authGroup, deviceID string)
 			clientInfo.PreferredChannelMode = pb.ChannelMode_CHANNEL_MODE_AUTO
 			netInfo.UpsertClient(virtualIP, clientInfo)
 			c.nc.IPSessions.Set(NewIpSessionKey(netInfo.Group, util.Uint32ToIP(virtualIP)), clientInfo.Address)
+			networkChanged = true
+		}
+		if networkChanged {
+			netInfo.Epoch++
+		}
+	}
+}
+
+func (c *Controller) removeAuthedDeviceRuntimeState(records []UMAuthDevice) {
+	if len(records) == 0 {
+		return
+	}
+	remove := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		remove[authedDeviceKey(record.GroupName, record.DeviceID)] = struct{}{}
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for networkKey, netInfo := range c.nc.VirtualNetwork.data {
+		networkChanged := false
+		for virtualIP, clientInfo := range netInfo.Clients {
+			authGroup := clientAuthGroup(clientInfo, netInfo.Group)
+			if _, ok := remove[authedDeviceKey(authGroup, clientInfo.DeviceId)]; !ok {
+				continue
+			}
+			netInfo.DeleteClient(virtualIP)
+			c.nc.IPSessions.Delete(NewIpSessionKey(networkKey, util.Uint32ToIP(virtualIP)))
+			networkChanged = true
+		}
+		if networkChanged {
+			netInfo.Epoch++
+		}
+	}
+}
+
+func (c *Controller) updateAuthedDeviceRuntimeName(record UMAuthDevice) {
+	displayName := strings.TrimSpace(record.DisplayName)
+	if displayName == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, netInfo := range c.nc.VirtualNetwork.data {
+		networkChanged := false
+		for virtualIP, clientInfo := range netInfo.Clients {
+			authGroup := clientAuthGroup(clientInfo, netInfo.Group)
+			if authGroup != record.GroupName || clientInfo.DeviceId != record.DeviceID {
+				continue
+			}
+			if clientInfo.Name == displayName {
+				continue
+			}
+			clientInfo.Name = displayName
+			netInfo.UpsertClient(virtualIP, clientInfo)
 			networkChanged = true
 		}
 		if networkChanged {

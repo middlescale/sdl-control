@@ -197,6 +197,30 @@ func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) 
 			fmt.Fprintln(stdout)
 			writeDeviceTable(stdout, "Current devices", resp.Devices)
 		}
+	case "delete_device":
+		writeKeyValueBlock(stdout, "Deleted device", []kv{
+			{Key: "Updated Count", Value: fmt.Sprintf("%d", resp.UpdatedCount)},
+		})
+		if len(resp.UpdatedDevices) > 0 {
+			fmt.Fprintln(stdout)
+			writeDeviceTable(stdout, "Deleted devices", resp.UpdatedDevices)
+		}
+		if len(resp.Devices) > 0 {
+			fmt.Fprintln(stdout)
+			writeDeviceTable(stdout, "Current devices", resp.Devices)
+		}
+	case "rename_device":
+		writeKeyValueBlock(stdout, "Renamed device", []kv{
+			{Key: "Updated Count", Value: fmt.Sprintf("%d", resp.UpdatedCount)},
+		})
+		if len(resp.UpdatedDevices) > 0 {
+			fmt.Fprintln(stdout)
+			writeDeviceTable(stdout, "Renamed devices", resp.UpdatedDevices)
+		}
+		if len(resp.Devices) > 0 {
+			fmt.Fprintln(stdout)
+			writeDeviceTable(stdout, "Current devices", resp.Devices)
+		}
 	case "dns_domains":
 		writeDomains(stdout, resp.Domains)
 	case "dns_snapshot":
@@ -294,10 +318,70 @@ func parseDevice(args []string) adminRequest {
 		return parseDeviceIssueAuthTicket(args[1:])
 	case "extend-expiry":
 		return parseDeviceExtendExpiry(args[1:])
+	case "delete":
+		return parseDeviceDelete(args[1:])
+	case "rename":
+		return parseDeviceRename(args[1:])
 	default:
 		fatalUsage()
 	}
 	return adminRequest{}
+}
+
+func parseDeviceDelete(args []string) adminRequest {
+	fs := flag.NewFlagSet("device delete", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var userID string
+	var group string
+	var deviceID string
+	fs.StringVar(&userID, "id", "", "user id")
+	fs.StringVar(&userID, "u", "", "user id")
+	fs.StringVar(&group, "group", "", "optional group filter")
+	fs.StringVar(&group, "g", "", "optional group filter")
+	fs.StringVar(&deviceID, "device-id", "", "device id")
+	fs.StringVar(&deviceID, "d", "", "device id")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(deviceID) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:   "delete_device",
+		UserID:   strings.TrimSpace(userID),
+		Group:    strings.TrimSpace(group),
+		DeviceID: strings.TrimSpace(deviceID),
+	}
+}
+
+func parseDeviceRename(args []string) adminRequest {
+	fs := flag.NewFlagSet("device rename", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var userID string
+	var group string
+	var deviceID string
+	var name string
+	fs.StringVar(&userID, "id", "", "user id")
+	fs.StringVar(&userID, "u", "", "user id")
+	fs.StringVar(&group, "group", "", "optional group filter")
+	fs.StringVar(&group, "g", "", "optional group filter")
+	fs.StringVar(&deviceID, "device-id", "", "device id")
+	fs.StringVar(&deviceID, "d", "", "device id")
+	fs.StringVar(&name, "name", "", "new device display name")
+	fs.StringVar(&name, "n", "", "new device display name")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(deviceID) == "" || strings.TrimSpace(name) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:   "rename_device",
+		UserID:   strings.TrimSpace(userID),
+		Group:    strings.TrimSpace(group),
+		DeviceID: strings.TrimSpace(deviceID),
+		Name:     strings.TrimSpace(name),
+	}
 }
 
 func parseDeviceIssueAuthTicket(args []string) adminRequest {
@@ -583,6 +667,8 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device list --id/-u u-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device issue-auth-ticket --id/-u u-1 [--group/-g default.ms.net] [--ttl-seconds/-t 300]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device extend-expiry --id/-u u-1 (--device-id/-d dev-1 | --all) [--group/-g sales.ms.net] [--ttl-seconds/-t 2592000]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device rename --id/-u u-1 --device-id/-d dev-1 --name/-n node-1 [--group/-g sales.ms.net]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] device delete --id/-u u-1 --device-id/-d dev-1 [--group/-g sales.ms.net]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --list")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --enlist gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --delist gw-1")

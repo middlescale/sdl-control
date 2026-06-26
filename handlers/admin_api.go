@@ -117,6 +117,62 @@ func executeAdminRequest(ctrl *control.Controller, version string, req adminRequ
 			UpdatedDevices: selectUpdatedDeviceViews(updated, devices),
 			UpdatedCount:   len(updated),
 		}
+	case "delete_device":
+		userID := strings.TrimSpace(req.UserID)
+		if userID == "" {
+			return adminResponse{OK: false, Error: "user_id required"}
+		}
+		deleted, err := ctrl.DeleteAuthedDevice(userID, strings.TrimSpace(req.Group), strings.TrimSpace(req.DeviceID))
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChange(); pushErr != nil {
+			log.Errorf("BuildPushDeviceListPacketsForGatewayChange error: %v", pushErr)
+		} else {
+			for _, push := range pushPackets {
+				if push == nil || push.DstIP == nil {
+					continue
+				}
+				if err := quicStreams.writeToRoute(push.RouteNetworkKey, util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+				}
+			}
+		}
+		devices := ctrl.ListDevices(userID)
+		return adminResponse{
+			OK:             true,
+			Devices:        devices,
+			UpdatedDevices: selectUpdatedDeviceViews(deleted, devices),
+			UpdatedCount:   len(deleted),
+		}
+	case "rename_device":
+		userID := strings.TrimSpace(req.UserID)
+		if userID == "" {
+			return adminResponse{OK: false, Error: "user_id required"}
+		}
+		renamed, err := ctrl.RenameAuthedDevice(userID, strings.TrimSpace(req.Group), strings.TrimSpace(req.DeviceID), strings.TrimSpace(req.Name))
+		if err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForGatewayChange(); pushErr != nil {
+			log.Errorf("BuildPushDeviceListPacketsForGatewayChange error: %v", pushErr)
+		} else {
+			for _, push := range pushPackets {
+				if push == nil || push.DstIP == nil {
+					continue
+				}
+				if err := quicStreams.writeToRoute(push.RouteNetworkKey, util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+				}
+			}
+		}
+		devices := ctrl.ListDevices(userID)
+		return adminResponse{
+			OK:             true,
+			Devices:        devices,
+			UpdatedDevices: selectUpdatedDeviceViews([]control.UMAuthDevice{renamed}, devices),
+			UpdatedCount:   1,
+		}
 	case "dns_domains":
 		return adminResponse{OK: true, Domains: ctrl.ListDNSDomains()}
 	case "dns_snapshot":

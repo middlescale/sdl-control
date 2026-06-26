@@ -121,6 +121,10 @@ func (c *Controller) UMAuthDevice(userID string, groupName string, deviceID stri
 	return c.um.AuthDevice(userID, groupName, deviceID, ticket, pubKey)
 }
 
+func (c *Controller) UMAssignAuthedDeviceDisplayName(groupName string, deviceID string, displayName string) (UMAuthDevice, error) {
+	return c.um.AssignAuthedDeviceDisplayName(groupName, deviceID, displayName)
+}
+
 func (c *Controller) UMIsAuthedDevice(groupName string, deviceID string) bool {
 	return c.um.IsAuthedDevice(groupName, deviceID)
 }
@@ -137,6 +141,10 @@ func (c *Controller) UMSetAuthedDeviceDisplayName(groupName string, deviceID str
 	return c.um.SetAuthedDeviceDisplayName(groupName, deviceID, displayName)
 }
 
+func (c *Controller) UMRenameAuthedDevice(userID string, groupName string, deviceID string, displayName string) (UMAuthDevice, error) {
+	return c.um.RenameAuthedDevice(userID, groupName, deviceID, displayName)
+}
+
 func (c *Controller) UMExtendAuthedDeviceExpiry(
 	userID string,
 	groupName string,
@@ -145,6 +153,28 @@ func (c *Controller) UMExtendAuthedDeviceExpiry(
 	all bool,
 ) ([]UMAuthDevice, error) {
 	return c.um.ExtendAuthedDeviceExpiry(userID, groupName, deviceID, ttl, all)
+}
+
+func (c *Controller) UMDeleteAuthedDevice(userID string, groupName string, deviceID string) ([]UMAuthDevice, error) {
+	return c.um.DeleteAuthedDevice(userID, groupName, deviceID)
+}
+
+func (c *Controller) DeleteAuthedDevice(userID string, groupName string, deviceID string) ([]UMAuthDevice, error) {
+	records, err := c.UMDeleteAuthedDevice(userID, groupName, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	c.removeAuthedDeviceRuntimeState(records)
+	return records, nil
+}
+
+func (c *Controller) RenameAuthedDevice(userID string, groupName string, deviceID string, displayName string) (UMAuthDevice, error) {
+	record, err := c.UMRenameAuthedDevice(userID, groupName, deviceID, displayName)
+	if err != nil {
+		return UMAuthDevice{}, err
+	}
+	c.updateAuthedDeviceRuntimeName(record)
+	return record, nil
 }
 
 func (c *Controller) UMRequireTicketAuthForGroup(groupName string) bool {

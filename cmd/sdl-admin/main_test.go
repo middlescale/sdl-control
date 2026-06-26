@@ -58,6 +58,20 @@ func TestParseDeviceExtendExpiryAll(t *testing.T) {
 	}
 }
 
+func TestParseDeviceDelete(t *testing.T) {
+	req := parseDevice([]string{"delete", "-u", "user-1", "-d", "dev-1", "--group", "sales"})
+	if req.Action != "delete_device" || req.UserID != "user-1" || req.DeviceID != "dev-1" || req.Group != "sales" {
+		t.Fatalf("unexpected delete device request: %+v", req)
+	}
+}
+
+func TestParseDeviceRename(t *testing.T) {
+	req := parseDevice([]string{"rename", "-u", "user-1", "-d", "dev-1", "--name", "aliyun-jp"})
+	if req.Action != "rename_device" || req.UserID != "user-1" || req.DeviceID != "dev-1" || req.Name != "aliyun-jp" {
+		t.Fatalf("unexpected rename device request: %+v", req)
+	}
+}
+
 func TestParseGatewayEnlist(t *testing.T) {
 	req := parseGateway([]string{"--enlist", "gw-1"})
 	if req.Action != "gateway_enlist" {

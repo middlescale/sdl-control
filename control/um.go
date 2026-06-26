@@ -493,18 +493,50 @@ func (m *UserManager) AuthDevice(
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	t := m.deviceTickets[ticket]
+	key := authedDeviceKey(normalizedGroup, deviceID)
+	displayName := ""
+	if existing, ok := m.authedDevices[key]; ok {
+		displayName = strings.TrimSpace(existing.DisplayName)
+	}
 	record := UMAuthDevice{
 		UserID:       userID,
 		GroupName:    normalizedGroup,
 		DeviceID:     deviceID,
-		DisplayName:  "",
+		DisplayName:  displayName,
 		PubKeyHex:    pubKeyHex,
 		AuthedAt:     now,
 		AuthExpireAt: now.Add(defaultDeviceAuthTTL),
 	}
-	m.authedDevices[authedDeviceKey(normalizedGroup, deviceID)] = record
+	m.authedDevices[key] = record
 	t.Used = true
 	m.deviceTickets[ticket] = t
+	if err := m.saveLocked(); err != nil {
+		return UMAuthDevice{}, err
+	}
+	return record, nil
+}
+
+func (m *UserManager) AssignAuthedDeviceDisplayName(
+	groupName string,
+	deviceID string,
+	displayName string,
+) (UMAuthDevice, error) {
+	displayName, err := normalizeRenameName(displayName)
+	if err != nil {
+		return UMAuthDevice{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := authedDeviceKey(groupName, deviceID)
+	record, ok := m.authedDevices[key]
+	if !ok {
+		return UMAuthDevice{}, fmt.Errorf("authed device not found")
+	}
+	if strings.TrimSpace(record.DisplayName) != "" {
+		return record, nil
+	}
+	record.DisplayName = m.uniqueDisplayNameLocked(record, displayName)
+	m.authedDevices[key] = record
 	if err := m.saveLocked(); err != nil {
 		return UMAuthDevice{}, err
 	}
@@ -611,6 +643,60 @@ func (m *UserManager) ExtendAuthedDeviceExpiry(
 	return updated, nil
 }
 
+func (m *UserManager) DeleteAuthedDevice(userID string, groupName string, deviceID string) ([]UMAuthDevice, error) {
+	userID = strings.TrimSpace(userID)
+	groupName = strings.TrimSpace(groupName)
+	deviceID = strings.TrimSpace(deviceID)
+	if userID == "" {
+		return nil, fmt.Errorf("user id is empty")
+	}
+	if deviceID == "" {
+		return nil, fmt.Errorf("device id is empty")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, ok := m.users[userID]
+	if !ok {
+		return nil, fmt.Errorf("user not found")
+	}
+	if groupName != "" {
+		normalized, err := normalizeGroupForUser(groupName, user.Domain)
+		if err != nil {
+			return nil, err
+		}
+		groupName = normalized
+	}
+
+	matches := make([]string, 0)
+	for key, record := range m.authedDevices {
+		if record.UserID != userID || record.DeviceID != deviceID {
+			continue
+		}
+		if groupName != "" && record.GroupName != groupName {
+			continue
+		}
+		matches = append(matches, key)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("authed device not found")
+	}
+	if groupName == "" && len(matches) > 1 {
+		return nil, fmt.Errorf("device id %s matched multiple groups; specify --group", deviceID)
+	}
+
+	deleted := make([]UMAuthDevice, 0, len(matches))
+	for _, key := range matches {
+		deleted = append(deleted, m.authedDevices[key])
+		delete(m.authedDevices, key)
+	}
+	if err := m.saveLocked(); err != nil {
+		return nil, err
+	}
+	return deleted, nil
+}
+
 func (m *UserManager) CheckAuthedDevice(groupName string, deviceID string, pubKey []byte) error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -667,6 +753,109 @@ func (m *UserManager) SetAuthedDeviceDisplayName(
 		return err
 	}
 	return nil
+}
+
+func (m *UserManager) RenameAuthedDevice(
+	userID string,
+	groupName string,
+	deviceID string,
+	displayName string,
+) (UMAuthDevice, error) {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return UMAuthDevice{}, fmt.Errorf("display name is empty")
+	}
+	if len(displayName) > 128 {
+		return UMAuthDevice{}, fmt.Errorf("display name too long")
+	}
+	userID = strings.TrimSpace(userID)
+	groupName = strings.TrimSpace(groupName)
+	deviceID = strings.TrimSpace(deviceID)
+	if userID == "" {
+		return UMAuthDevice{}, fmt.Errorf("user id is empty")
+	}
+	if deviceID == "" {
+		return UMAuthDevice{}, fmt.Errorf("device id is empty")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	user, ok := m.users[userID]
+	if !ok {
+		return UMAuthDevice{}, fmt.Errorf("user not found")
+	}
+	if groupName != "" {
+		normalized, err := normalizeGroupForUser(groupName, user.Domain)
+		if err != nil {
+			return UMAuthDevice{}, err
+		}
+		groupName = normalized
+	}
+
+	matches := make([]string, 0)
+	for key, record := range m.authedDevices {
+		if record.UserID != userID || record.DeviceID != deviceID {
+			continue
+		}
+		if groupName != "" && record.GroupName != groupName {
+			continue
+		}
+		matches = append(matches, key)
+	}
+	if len(matches) == 0 {
+		return UMAuthDevice{}, fmt.Errorf("authed device not found")
+	}
+	if groupName == "" && len(matches) > 1 {
+		return UMAuthDevice{}, fmt.Errorf("device id %s matched multiple groups; specify --group", deviceID)
+	}
+	key := matches[0]
+	record := m.authedDevices[key]
+	if m.displayNameExistsInNetworkLocked(record, displayName) {
+		return UMAuthDevice{}, fmt.Errorf("display name already exists")
+	}
+	record.DisplayName = displayName
+	m.authedDevices[key] = record
+	if err := m.saveLocked(); err != nil {
+		return UMAuthDevice{}, err
+	}
+	return record, nil
+}
+
+func (m *UserManager) uniqueDisplayNameLocked(record UMAuthDevice, desired string) string {
+	desired = strings.TrimSpace(desired)
+	if desired == "" {
+		desired = strings.TrimSpace(record.DeviceID)
+	}
+	if desired == "" || !m.displayNameExistsInNetworkLocked(record, desired) {
+		return desired
+	}
+	for i := 1; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", desired, i)
+		if !m.displayNameExistsInNetworkLocked(record, candidate) {
+			return candidate
+		}
+	}
+}
+
+func (m *UserManager) displayNameExistsInNetworkLocked(record UMAuthDevice, displayName string) bool {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return false
+	}
+	networkKey := NewNetworkIdentity(record.GroupName, record.UserID).Key()
+	for _, existing := range m.authedDevices {
+		if existing.GroupName == record.GroupName && existing.DeviceID == record.DeviceID {
+			continue
+		}
+		if NewNetworkIdentity(existing.GroupName, existing.UserID).Key() != networkKey {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(existing.DisplayName), displayName) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *UserManager) RequireTicketAuthForGroup(groupName string) bool {

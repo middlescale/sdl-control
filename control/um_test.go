@@ -317,3 +317,80 @@ func TestExtendAuthedDeviceExpiryAll(t *testing.T) {
 		}
 	}
 }
+
+func TestAssignAuthedDeviceDisplayNameAddsSuffixOnConflict(t *testing.T) {
+	um := NewUserManager()
+	user, _ := um.CreateUserWithID("sdl-user", "ms.net", "user")
+	tk1, _ := um.IssueDeviceTicket(user.UserID, "user", time.Minute)
+	tk2, _ := um.IssueDeviceTicket(user.UserID, "user", time.Minute)
+	if _, err := um.AuthDevice(user.UserID, "user.ms.net", "dev-1", tk1.Ticket, []byte("pk-dev-1")); err != nil {
+		t.Fatalf("AuthDevice dev-1 failed: %v", err)
+	}
+	if _, err := um.AuthDevice(user.UserID, "user.ms.net", "dev-2", tk2.Ticket, []byte("pk-dev-2")); err != nil {
+		t.Fatalf("AuthDevice dev-2 failed: %v", err)
+	}
+	record1, err := um.AssignAuthedDeviceDisplayName("user.ms.net", "dev-1", "aliyun-jp")
+	if err != nil {
+		t.Fatalf("AssignAuthedDeviceDisplayName dev-1 failed: %v", err)
+	}
+	record2, err := um.AssignAuthedDeviceDisplayName("user.ms.net", "dev-2", "aliyun-jp")
+	if err != nil {
+		t.Fatalf("AssignAuthedDeviceDisplayName dev-2 failed: %v", err)
+	}
+	if record1.DisplayName != "aliyun-jp" || record2.DisplayName != "aliyun-jp-1" {
+		t.Fatalf("unexpected assigned names: %q %q", record1.DisplayName, record2.DisplayName)
+	}
+}
+
+func TestRenameAuthedDeviceRejectsConflictAndDeleteFreesName(t *testing.T) {
+	um := NewUserManager()
+	user, _ := um.CreateUserWithID("sdl-user", "ms.net", "user")
+	tk1, _ := um.IssueDeviceTicket(user.UserID, "user", time.Minute)
+	tk2, _ := um.IssueDeviceTicket(user.UserID, "user", time.Minute)
+	if _, err := um.AuthDevice(user.UserID, "user.ms.net", "dev-1", tk1.Ticket, []byte("pk-dev-1")); err != nil {
+		t.Fatalf("AuthDevice dev-1 failed: %v", err)
+	}
+	if _, err := um.AuthDevice(user.UserID, "user.ms.net", "dev-2", tk2.Ticket, []byte("pk-dev-2")); err != nil {
+		t.Fatalf("AuthDevice dev-2 failed: %v", err)
+	}
+	if _, err := um.RenameAuthedDevice(user.UserID, "user", "dev-1", "aliyun-jp"); err != nil {
+		t.Fatalf("RenameAuthedDevice dev-1 failed: %v", err)
+	}
+	if _, err := um.RenameAuthedDevice(user.UserID, "user", "dev-2", "ALIYUN-JP"); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("expected duplicate rename error, got %v", err)
+	}
+	deleted, err := um.DeleteAuthedDevice(user.UserID, "user", "dev-1")
+	if err != nil {
+		t.Fatalf("DeleteAuthedDevice failed: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0].DeviceID != "dev-1" {
+		t.Fatalf("unexpected deleted devices: %+v", deleted)
+	}
+	renamed, err := um.RenameAuthedDevice(user.UserID, "user", "dev-2", "aliyun-jp")
+	if err != nil {
+		t.Fatalf("RenameAuthedDevice after delete failed: %v", err)
+	}
+	if renamed.DisplayName != "aliyun-jp" {
+		t.Fatalf("unexpected renamed display name: %+v", renamed)
+	}
+}
+
+func TestAuthDevicePreservesExistingDisplayName(t *testing.T) {
+	um := NewUserManager()
+	user, _ := um.CreateUserWithID("sdl-user", "ms.net", "user")
+	tk1, _ := um.IssueDeviceTicket(user.UserID, "user", time.Minute)
+	if _, err := um.AuthDevice(user.UserID, "user.ms.net", "dev-1", tk1.Ticket, []byte("pk-dev-1")); err != nil {
+		t.Fatalf("AuthDevice initial failed: %v", err)
+	}
+	if _, err := um.RenameAuthedDevice(user.UserID, "user", "dev-1", "aliyun-jp"); err != nil {
+		t.Fatalf("RenameAuthedDevice failed: %v", err)
+	}
+	tk2, _ := um.IssueDeviceTicket(user.UserID, "user", time.Minute)
+	record, err := um.AuthDevice(user.UserID, "user.ms.net", "dev-1", tk2.Ticket, []byte("pk-dev-1"))
+	if err != nil {
+		t.Fatalf("AuthDevice reauth failed: %v", err)
+	}
+	if record.DisplayName != "aliyun-jp" {
+		t.Fatalf("reauth lost display name: %+v", record)
+	}
+}

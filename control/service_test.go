@@ -1811,8 +1811,66 @@ func TestHandleDeviceRenamePacketRejectsDuplicateName(t *testing.T) {
 	if !ok {
 		t.Fatalf("authed device not found after rename")
 	}
-	if record.DisplayName != "" {
+	if record.DisplayName != "node-b" {
 		t.Fatalf("duplicate rename should not persist display name: %+v", record)
+	}
+}
+
+func TestRegistrationAssignsUniqueDisplayName(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	resp1 := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "aliyun-jp"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	resp2 := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "aliyun-jp"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+
+	client1, ok := ctrl.nc.FindClientByVirtualIP(resp1.GetVirtualIp())
+	if !ok {
+		t.Fatalf("client dev-a not found")
+	}
+	client2, ok := ctrl.nc.FindClientByVirtualIP(resp2.GetVirtualIp())
+	if !ok {
+		t.Fatalf("client dev-b not found")
+	}
+	if client1.Name != "aliyun-jp" || client2.Name != "aliyun-jp-1" {
+		t.Fatalf("unexpected client names: %q %q", client1.Name, client2.Name)
+	}
+	record1, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-a")
+	if !ok {
+		t.Fatalf("authed dev-a missing")
+	}
+	record2, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-b")
+	if !ok {
+		t.Fatalf("authed dev-b missing")
+	}
+	if record1.DisplayName != "aliyun-jp" || record2.DisplayName != "aliyun-jp-1" {
+		t.Fatalf("unexpected persisted names: %q %q", record1.DisplayName, record2.DisplayName)
+	}
+}
+
+func TestDeleteAuthedDeviceRemovesRuntimeClient(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	resp := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	if _, ok := ctrl.nc.FindClientByVirtualIP(resp.GetVirtualIp()); !ok {
+		t.Fatalf("client not found before delete")
+	}
+	record, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-a")
+	if !ok {
+		t.Fatalf("authed device not found before delete")
+	}
+	deleted, err := ctrl.DeleteAuthedDevice(record.UserID, "ms.net", "dev-a")
+	if err != nil {
+		t.Fatalf("DeleteAuthedDevice failed: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0].DeviceID != "dev-a" {
+		t.Fatalf("unexpected deleted devices: %+v", deleted)
+	}
+	if _, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-a"); ok {
+		t.Fatalf("authed device still exists after delete")
+	}
+	if _, ok := ctrl.nc.FindClientByVirtualIP(resp.GetVirtualIp()); ok {
+		t.Fatalf("runtime client still exists after delete")
 	}
 }
 
