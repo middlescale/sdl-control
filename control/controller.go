@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -47,6 +48,9 @@ type Controller struct {
 	gatewayGrantFingerprint string
 	gatewayGrantPolicyRev   uint64
 	gatewayGrantCache       map[string]cachedGatewayGrant
+
+	exitNodeMu       sync.RWMutex
+	exitNodeApproved map[string]map[string]bool
 
 	debugMu                  sync.Mutex
 	debugCollectSeq          uint64
@@ -116,6 +120,21 @@ type DeviceAdminView struct {
 	AuthedAtUnix       int64  `json:"authed_at_unix,omitempty"`
 	AuthExpireAtUnix   int64  `json:"auth_expire_at_unix,omitempty"`
 	AuthExpired        bool   `json:"auth_expired,omitempty"`
+	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
+}
+
+type ExitNodeAdminView struct {
+	UserID             string `json:"user_id"`
+	Group              string `json:"group,omitempty"`
+	Name               string `json:"name,omitempty"`
+	DeviceID           string `json:"device_id"`
+	VirtualIP          string `json:"virtual_ip,omitempty"`
+	Approved           bool   `json:"approved"`
+	Advertised         bool   `json:"advertised"`
+	LocalReady         bool   `json:"local_ready"`
+	Usable             bool   `json:"usable"`
+	ControlOnline      bool   `json:"control_online"`
+	DataPlaneReachable bool   `json:"data_plane_reachable"`
 	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
 }
 
@@ -201,6 +220,10 @@ func NewController(cfg *config.Config, db *sql.DB) (*Controller, error) {
 		return nil, err
 	}
 	gatewayAllow, gatewayStore := newGatewayApprovalStateFromStore()
+	exitNodeApproved, err := newExitNodeApprovalStateFromStore(pgStore)
+	if err != nil {
+		return nil, err
+	}
 	return &Controller{
 		pgStore: pgStore,
 		nc: NetworkControl{
@@ -221,6 +244,7 @@ func NewController(cfg *config.Config, db *sql.DB) (*Controller, error) {
 		gatewaySeen:              make(map[string]GatewayNodeInfo),
 		gatewayNonce:             make(map[string]map[string]int64),
 		gatewayGrantCache:        make(map[string]cachedGatewayGrant),
+		exitNodeApproved:         exitNodeApproved,
 		pendingDebugCollect:      make(map[uint64]chan DebugCollectResult),
 		pendingDebugWatchStart:   make(map[uint64]chan DebugWatchStartResult),
 		pendingDebugWatchStop:    make(map[uint64]chan DebugWatchStopResult),
@@ -318,6 +342,37 @@ func newGatewayApprovalStateFromStore() (map[string]string, *JSONGatewayStore) {
 		approved[gatewayID] = endpoint
 	}
 	return approved, store
+}
+
+func newExitNodeApprovalStateFromStore(pgStore *store.Store) (map[string]map[string]bool, error) {
+	if pgStore != nil {
+		approved, err := loadExitNodeApprovalStateFromPostgres(pgStore)
+		if err != nil {
+			return nil, fmt.Errorf("load exit-node approval store from postgres: %w", err)
+		}
+		return approved, nil
+	}
+	return map[string]map[string]bool{}, nil
+}
+
+func loadExitNodeApprovalStateFromPostgres(pgStore *store.Store) (map[string]map[string]bool, error) {
+	records, err := pgStore.ListActiveExitNodeApprovals()
+	if err != nil {
+		return nil, err
+	}
+	approved := make(map[string]map[string]bool)
+	for _, record := range records {
+		userID := strings.TrimSpace(record.UserID)
+		deviceID := strings.TrimSpace(record.DeviceID)
+		if userID == "" || deviceID == "" {
+			continue
+		}
+		if approved[userID] == nil {
+			approved[userID] = map[string]bool{}
+		}
+		approved[userID][deviceID] = true
+	}
+	return approved, nil
 }
 
 func newDebugSnapshotStore(cfg *config.Config) *DebugSnapshotStore {
@@ -534,6 +589,7 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 	registrationResp.GatewayPolicyRev = gatewayPolicyRev
 	registrationResp.Epoch = uint32(netInfo.Epoch)
 	registrationResp.DeviceInfoList = buildDeviceInfoList(netInfo.Clients, virtualIP)
+	c.enrichDeviceInfoListExitNodesFromClients(registrationResp.DeviceInfoList, netInfo.Clients)
 
 	respBytes, err := proto.Marshal(registrationResp)
 	if err != nil {
@@ -815,6 +871,7 @@ func (c *Controller) HandlePullDeviceListPacketInNetwork(request *protocol.Packe
 		if strings.TrimSpace(routeNetworkKey) == "" {
 			routeNetworkKey = clientNetworkKey(client, "")
 		}
+		c.enrichDeviceInfoListExitNodes(routeNetworkKey, deviceList.DeviceInfoList)
 		deviceList.GatewayAccessGrants, deviceList.GatewayPolicyRev = c.buildGatewayAccessGrantsForExistingClient(routeNetworkKey, selfIP, client.DeviceId)
 	}
 	payload, err := proto.Marshal(deviceList)
@@ -835,6 +892,33 @@ func (c *Controller) HandlePullDeviceListPacketInNetwork(request *protocol.Packe
 
 func (c *Controller) BuildPushDeviceListPacketsForPeerChange(changedIP uint32) ([]*protocol.Packet, error) {
 	return c.BuildPushDeviceListPacketsForPeerChangeInNetwork("", changedIP)
+}
+
+func (c *Controller) BuildPushDeviceListPacketsForAuthedDeviceChange(userID, deviceID string) ([]*protocol.Packet, error) {
+	userID = strings.TrimSpace(userID)
+	deviceID = strings.TrimSpace(deviceID)
+	if userID == "" || deviceID == "" {
+		return nil, nil
+	}
+	var selectedIP uint32
+	c.nc.VirtualNetwork.mutex.RLock()
+	for _, network := range c.nc.VirtualNetwork.data {
+		for _, client := range network.Clients {
+			if client.UserID != userID || client.DeviceId != deviceID || !client.ControlOnline {
+				continue
+			}
+			selectedIP = client.VirtualIp
+			break
+		}
+		if selectedIP != 0 {
+			break
+		}
+	}
+	c.nc.VirtualNetwork.mutex.RUnlock()
+	if selectedIP != 0 {
+		return c.BuildPushDeviceListPacketsForPeerChange(selectedIP)
+	}
+	return nil, nil
 }
 
 func (c *Controller) BuildPushDeviceListPacketsForPeerChangeInNetwork(networkKey string, changedIP uint32) ([]*protocol.Packet, error) {
@@ -863,11 +947,13 @@ func (c *Controller) BuildPushDeviceListPacketsForPeerChangeInNetwork(networkKey
 			}
 			targetNetworkKey := clientNetworkKey(targetClient, network.Group)
 			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsForExistingClient(targetNetworkKey, targetIP, targetClient.DeviceId)
+			deviceInfoList := buildDeviceInfoList(network.Clients, targetIP)
+			c.enrichDeviceInfoListExitNodesFromClients(deviceInfoList, network.Clients)
 			packet, err := c.buildPushDeviceListPacket(
 				targetNetworkKey,
 				targetIP,
 				uint32(network.Epoch),
-				buildDeviceInfoList(network.Clients, targetIP),
+				deviceInfoList,
 				gatewayGrants,
 				gatewayPolicyRev,
 			)
@@ -893,11 +979,13 @@ func (c *Controller) BuildPushDeviceListPacketsForGatewayChange() ([]*protocol.P
 			}
 			targetNetworkKey := clientNetworkKey(targetClient, network.Group)
 			gatewayGrants, gatewayPolicyRev := c.buildGatewayAccessGrantsForExistingClient(targetNetworkKey, targetIP, targetClient.DeviceId)
+			deviceInfoList := buildDeviceInfoList(network.Clients, targetIP)
+			c.enrichDeviceInfoListExitNodesFromClients(deviceInfoList, network.Clients)
 			packet, err := c.buildPushDeviceListPacket(
 				targetNetworkKey,
 				targetIP,
 				uint32(network.Epoch),
-				buildDeviceInfoList(network.Clients, targetIP),
+				deviceInfoList,
 				gatewayGrants,
 				gatewayPolicyRev,
 			)
@@ -1162,6 +1250,8 @@ func (c *Controller) HandleClientStatusInfoPacketInNetwork(request *protocol.Pac
 		IsCone:             status.GetNatType() == pb.PunchNatType_Cone,
 		PunchTriggerReason: status.GetPunchTriggerReason().String(),
 		UpdateTime:         now,
+		ExitNodeAdvertised: status.GetExitNodeAdvertised(),
+		ExitNodeLocalReady: status.GetExitNodeLocalReady(),
 	}
 	for _, item := range status.GetP2PList() {
 		clientStatus.P2PList = append(clientStatus.P2PList, util.Uint32ToIP(item.GetNextIp()))
@@ -1220,6 +1310,11 @@ func (c *Controller) HandleClientStatusInfoPacketInNetwork(request *protocol.Pac
 			client.DataPlaneLastSeen = now
 		}
 		changed := client.PreferredChannelMode != status.GetPreferredChannelMode()
+		if client.ClientStatus == nil ||
+			client.ClientStatus.ExitNodeAdvertised != clientStatus.ExitNodeAdvertised ||
+			client.ClientStatus.ExitNodeLocalReady != clientStatus.ExitNodeLocalReady {
+			changed = true
+		}
 		client.ClientStatus = clientStatus
 		client.PreferredChannelMode = status.GetPreferredChannelMode()
 		network.UpsertClient(srcIP, client)
@@ -1255,6 +1350,9 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 				if parsed, ok := pb.PunchTriggerReason_value[srcClient.ClientStatus.PunchTriggerReason]; ok {
 					triggerReason = pb.PunchTriggerReason(parsed)
 				}
+			}
+			if triggerReason == pb.PunchTriggerReason_StatusReportOnly {
+				continue
 			}
 			if triggerReason == pb.PunchTriggerReason_PunchTriggerStatusUpdate {
 				if shouldSuppressPunchStartForStatusUpdate(srcClient, srcIP, targetClient, targetIP) {
@@ -2360,6 +2458,255 @@ func (c *Controller) ListDevices(userID string) []DeviceAdminView {
 	return devices
 }
 
+func (c *Controller) ApproveExitNode(userID, deviceID string) error {
+	userID = strings.TrimSpace(userID)
+	deviceID = strings.TrimSpace(deviceID)
+	if userID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+	if deviceID == "" {
+		return fmt.Errorf("device_id is required")
+	}
+	if !c.isAuthedDeviceForUser(userID, deviceID) {
+		return fmt.Errorf("device %s is not authed for user %s", deviceID, userID)
+	}
+	if c.pgStore == nil {
+		return fmt.Errorf("exit-node approval requires DATABASE_URL")
+	}
+	c.exitNodeMu.Lock()
+	defer c.exitNodeMu.Unlock()
+	if err := c.pgStore.ApproveExitNode(userID, deviceID, "sdl-admin"); err != nil {
+		return err
+	}
+	if c.exitNodeApproved[userID] == nil {
+		c.exitNodeApproved[userID] = map[string]bool{}
+	}
+	c.exitNodeApproved[userID][deviceID] = true
+	return nil
+}
+
+func (c *Controller) RevokeExitNode(userID, deviceID string) error {
+	userID = strings.TrimSpace(userID)
+	deviceID = strings.TrimSpace(deviceID)
+	if userID == "" {
+		return fmt.Errorf("user_id is required")
+	}
+	if deviceID == "" {
+		return fmt.Errorf("device_id is required")
+	}
+	if c.pgStore == nil {
+		return fmt.Errorf("exit-node approval requires DATABASE_URL")
+	}
+	c.exitNodeMu.Lock()
+	defer c.exitNodeMu.Unlock()
+	devices := c.exitNodeApproved[userID]
+	if len(devices) == 0 || !devices[deviceID] {
+		return fmt.Errorf("exit node %s for user %s is not approved", deviceID, userID)
+	}
+	if err := c.pgStore.RevokeExitNode(userID, deviceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("exit node %s for user %s is not approved", deviceID, userID)
+		}
+		return err
+	}
+	delete(devices, deviceID)
+	if len(devices) == 0 {
+		delete(c.exitNodeApproved, userID)
+	}
+	return nil
+}
+
+func (c *Controller) ListExitNodes(userID string) []ExitNodeAdminView {
+	userID = strings.TrimSpace(userID)
+	c.exitNodeMu.RLock()
+	approved := make(map[string]map[string]bool, len(c.exitNodeApproved))
+	for approvedUserID, devices := range c.exitNodeApproved {
+		if userID != "" && approvedUserID != userID {
+			continue
+		}
+		approved[approvedUserID] = make(map[string]bool, len(devices))
+		for deviceID, ok := range devices {
+			if ok {
+				approved[approvedUserID][deviceID] = true
+			}
+		}
+	}
+	c.exitNodeMu.RUnlock()
+
+	records := c.um.ListAuthedDevices()
+	if userID != "" {
+		records = c.um.ListAuthedDevicesByUser(userID)
+	}
+	viewsByKey := make(map[string]ExitNodeAdminView)
+	for _, record := range records {
+		if userID != "" && record.UserID != userID {
+			continue
+		}
+		isApproved := approved[record.UserID][record.DeviceID]
+		if userID == "" && !isApproved {
+			continue
+		}
+		name := strings.TrimSpace(record.DisplayName)
+		if name == "" {
+			name = record.DeviceID
+		}
+		key := record.UserID + "\x00" + record.DeviceID
+		viewsByKey[key] = ExitNodeAdminView{
+			UserID:   record.UserID,
+			Group:    record.GroupName,
+			Name:     name,
+			DeviceID: record.DeviceID,
+			Approved: isApproved,
+		}
+	}
+	for approvedUserID, devices := range approved {
+		for deviceID := range devices {
+			key := approvedUserID + "\x00" + deviceID
+			if _, ok := viewsByKey[key]; ok {
+				continue
+			}
+			viewsByKey[key] = ExitNodeAdminView{
+				UserID:   approvedUserID,
+				DeviceID: deviceID,
+				Approved: true,
+			}
+		}
+	}
+	c.mergeExitNodeRuntimeViews(viewsByKey)
+
+	views := make([]ExitNodeAdminView, 0, len(viewsByKey))
+	for _, view := range viewsByKey {
+		view.Usable = view.Approved && view.Advertised && view.LocalReady && view.ControlOnline
+		views = append(views, view)
+	}
+	sort.Slice(views, func(i, j int) bool {
+		if views[i].UserID != views[j].UserID {
+			return views[i].UserID < views[j].UserID
+		}
+		if views[i].Group != views[j].Group {
+			return views[i].Group < views[j].Group
+		}
+		if views[i].Name != views[j].Name {
+			return views[i].Name < views[j].Name
+		}
+		return views[i].DeviceID < views[j].DeviceID
+	})
+	return views
+}
+
+func (c *Controller) exitNodeApprovedSnapshot() map[string]map[string]bool {
+	c.exitNodeMu.RLock()
+	defer c.exitNodeMu.RUnlock()
+	approved := make(map[string]map[string]bool, len(c.exitNodeApproved))
+	for userID, devices := range c.exitNodeApproved {
+		approved[userID] = make(map[string]bool, len(devices))
+		for deviceID, ok := range devices {
+			if ok {
+				approved[userID][deviceID] = true
+			}
+		}
+	}
+	return approved
+}
+
+func (c *Controller) enrichDeviceInfoListExitNodes(networkKey string, items []*pb.DeviceInfo) {
+	if len(items) == 0 {
+		return
+	}
+	c.nc.VirtualNetwork.mutex.RLock()
+	defer c.nc.VirtualNetwork.mutex.RUnlock()
+	clientsByIP := map[uint32]ClientInfo{}
+	for key, network := range c.nc.VirtualNetwork.data {
+		if strings.TrimSpace(networkKey) != "" && key != networkKey {
+			continue
+		}
+		for ip, client := range network.Clients {
+			clientsByIP[ip] = client
+		}
+		if strings.TrimSpace(networkKey) != "" {
+			break
+		}
+	}
+	c.enrichDeviceInfoListExitNodesFromClients(items, clientsByIP)
+}
+
+func (c *Controller) enrichDeviceInfoListExitNodesFromClients(items []*pb.DeviceInfo, clientsByIP map[uint32]ClientInfo) {
+	if len(items) == 0 {
+		return
+	}
+	approved := c.exitNodeApprovedSnapshot()
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		client, ok := clientsByIP[item.GetVirtualIp()]
+		if !ok {
+			continue
+		}
+		isApproved := approved[client.UserID][client.DeviceId]
+		item.ExitNodeAdvertised = clientExitNodeAdvertised(client)
+		item.ExitNodeApproved = isApproved
+		item.ExitNodeUsable = isApproved && clientExitNodeUsable(client)
+	}
+}
+
+func (c *Controller) isAuthedDeviceForUser(userID, deviceID string) bool {
+	for _, record := range c.um.ListAuthedDevicesByUser(userID) {
+		if record.DeviceID == deviceID {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Controller) mergeExitNodeRuntimeViews(viewsByKey map[string]ExitNodeAdminView) {
+	c.nc.VirtualNetwork.mutex.RLock()
+	defer c.nc.VirtualNetwork.mutex.RUnlock()
+	for _, network := range c.nc.VirtualNetwork.data {
+		for ip, client := range network.Clients {
+			key := client.UserID + "\x00" + client.DeviceId
+			view, ok := viewsByKey[key]
+			if !ok {
+				continue
+			}
+			if strings.TrimSpace(client.Name) != "" {
+				view.Name = client.Name
+			}
+			if strings.TrimSpace(view.Group) == "" {
+				view.Group = clientAuthGroup(client, network.Group)
+			}
+			view.VirtualIP = util.Uint32ToIP(ip).String()
+			view.Advertised = clientExitNodeAdvertised(client)
+			view.LocalReady = clientExitNodeLocalReady(client)
+			view.ControlOnline = client.ControlOnline
+			view.DataPlaneReachable = client.DataPlaneReachable
+			updatedAt := client.ControlLastSeen
+			if client.DataPlaneLastSeen > updatedAt {
+				updatedAt = client.DataPlaneLastSeen
+			}
+			if client.LastJoin > updatedAt {
+				updatedAt = client.LastJoin
+			}
+			if updatedAt > view.UpdatedAtUnix {
+				view.UpdatedAtUnix = updatedAt
+			}
+			viewsByKey[key] = view
+		}
+	}
+}
+
+func clientExitNodeAdvertised(client ClientInfo) bool {
+	return client.ClientStatus != nil && client.ClientStatus.ExitNodeAdvertised
+}
+
+func clientExitNodeLocalReady(client ClientInfo) bool {
+	return client.ClientStatus != nil && client.ClientStatus.ExitNodeLocalReady
+}
+
+func clientExitNodeUsable(client ClientInfo) bool {
+	return client.ControlOnline && clientExitNodeAdvertised(client) && clientExitNodeLocalReady(client)
+}
+
 func (c *Controller) isGatewayAllowed(gatewayID, endpoint string) bool {
 	c.gatewayMu.RLock()
 	defer c.gatewayMu.RUnlock()
@@ -3201,6 +3548,7 @@ func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.Dev
 			DevicePubKey:         append([]byte(nil), info.DevicePubKey...),
 			OnlineKxPub:          append([]byte(nil), info.OnlineKxPub...),
 			PreferredChannelMode: info.PreferredChannelMode,
+			ExitNodeAdvertised:   clientExitNodeAdvertised(info),
 		}
 		if info.ControlOnline {
 			item.DeviceStatus = 0

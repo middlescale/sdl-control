@@ -52,6 +52,7 @@ type adminResponse struct {
 	Ticket         string          `json:"ticket,omitempty"`
 	ExpireAtUnix   int64           `json:"expire_at_unix,omitempty"`
 	Gateways       []gatewayInfo   `json:"gateways,omitempty"`
+	ExitNodes      []exitNodeInfo  `json:"exit_nodes,omitempty"`
 	Users          []userInfo      `json:"users,omitempty"`
 	Devices        []deviceInfo    `json:"devices,omitempty"`
 	UpdatedDevices []deviceInfo    `json:"updated_devices,omitempty"`
@@ -98,6 +99,21 @@ type deviceInfo struct {
 	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
 }
 
+type exitNodeInfo struct {
+	UserID             string `json:"user_id"`
+	Group              string `json:"group,omitempty"`
+	Name               string `json:"name,omitempty"`
+	DeviceID           string `json:"device_id"`
+	VirtualIP          string `json:"virtual_ip,omitempty"`
+	Approved           bool   `json:"approved"`
+	Advertised         bool   `json:"advertised"`
+	LocalReady         bool   `json:"local_ready"`
+	Usable             bool   `json:"usable"`
+	ControlOnline      bool   `json:"control_online"`
+	DataPlaneReachable bool   `json:"data_plane_reachable"`
+	UpdatedAtUnix      int64  `json:"updated_at_unix,omitempty"`
+}
+
 func main() {
 	global := flag.NewFlagSet("sdl-admin", flag.ContinueOnError)
 	global.SetOutput(os.Stderr)
@@ -124,6 +140,8 @@ func main() {
 		req = parseDevice(args[1:])
 	case "gateway":
 		req = parseGateway(args[1:])
+	case "exit-node", "exit_node":
+		req = parseExitNode(args[1:])
 	case "dnsDomains", "dns_domains":
 		req = parseDNSDomains(args[1:])
 	case "dnsSnapshot", "dns_snapshot":
@@ -183,6 +201,8 @@ func writeResponse(stdout, stderr io.Writer, action string, resp adminResponse) 
 		writeKeyValueBlock(stdout, "Gateway delisted", nil)
 	case "gateway_list":
 		writeGatewayTable(stdout, resp.Gateways)
+	case "exit_node_list", "exit_node_approve", "exit_node_revoke":
+		writeExitNodeTable(stdout, resp.ExitNodes)
 	case "list_device":
 		writeDeviceTable(stdout, "Devices", resp.Devices)
 	case "extend_device_expiry":
@@ -504,6 +524,60 @@ func parseGateway(args []string) adminRequest {
 	}
 }
 
+func parseExitNode(args []string) adminRequest {
+	if len(args) == 0 {
+		fatalUsage()
+	}
+	switch args[0] {
+	case "list":
+		return parseExitNodeList(args[1:])
+	case "approve":
+		return parseExitNodeApproval("exit_node_approve", args[1:])
+	case "revoke":
+		return parseExitNodeApproval("exit_node_revoke", args[1:])
+	default:
+		fatalUsage()
+	}
+	return adminRequest{}
+}
+
+func parseExitNodeList(args []string) adminRequest {
+	fs := flag.NewFlagSet("exit-node list", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var userID string
+	fs.StringVar(&userID, "id", "", "user id")
+	fs.StringVar(&userID, "u", "", "user id")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{Action: "exit_node_list", UserID: strings.TrimSpace(userID)}
+}
+
+func parseExitNodeApproval(action string, args []string) adminRequest {
+	fs := flag.NewFlagSet("exit-node approval", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var userID string
+	var deviceID string
+	fs.StringVar(&userID, "id", "", "user id")
+	fs.StringVar(&userID, "u", "", "user id")
+	fs.StringVar(&deviceID, "device-id", "", "device id")
+	fs.StringVar(&deviceID, "d", "", "device id")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(deviceID) == "" || fs.NArg() != 0 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:   action,
+		UserID:   strings.TrimSpace(userID),
+		DeviceID: strings.TrimSpace(deviceID),
+	}
+}
+
 func parseDNSSnapshot(args []string) adminRequest {
 	fs := flag.NewFlagSet("dnsSnapshot", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -672,6 +746,9 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --list")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --enlist gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --delist gw-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] exit-node list [--id/-u u-1]")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] exit-node approve --id/-u u-1 --device-id/-d dev-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] exit-node revoke --id/-u u-1 --device-id/-d dev-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsDomains")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsSnapshot --domain/-d ms.net [--group/-g default]")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] collectDebug --name/-n win10-node [--group/-g default.ms.net] [--userId/-u u-1] [--sections/-s runtime,gateway,peers,routes,nat,traffic] [--timeoutSec/-t 10]")
@@ -779,6 +856,34 @@ func writeDeviceTable(w io.Writer, title string, devices []deviceInfo) {
 			style.authCell(formatAuthState(device)),
 			style.timeCell(formatUnix(device.AuthExpireAtUnix)),
 			style.timeCell(formatUnix(device.UpdatedAtUnix)),
+		})
+	}
+	renderTable(w, style, headers, rows)
+}
+
+func writeExitNodeTable(w io.Writer, exitNodes []exitNodeInfo) {
+	style := newOutputStyle(w)
+	fmt.Fprintln(w, style.title(fmt.Sprintf("Exit nodes (%d)", len(exitNodes))))
+	if len(exitNodes) == 0 {
+		fmt.Fprintln(w, style.muted("  (none)"))
+		return
+	}
+	headers := []string{"USER ID", "GROUP", "NAME", "DEVICE ID", "VIRTUAL IP", "APPROVED", "ADVERTISED", "LOCAL READY", "USABLE", "CONTROL", "DATA", "UPDATED AT"}
+	rows := make([][]tableCell, 0, len(exitNodes))
+	for _, node := range exitNodes {
+		rows = append(rows, []tableCell{
+			plainCell(valueOrDash(node.UserID)),
+			plainCell(valueOrDash(node.Group)),
+			plainCell(valueOrDash(node.Name)),
+			plainCell(valueOrDash(node.DeviceID)),
+			plainCell(valueOrDash(node.VirtualIP)),
+			style.boolCell(node.Approved),
+			style.boolCell(node.Advertised),
+			style.boolCell(node.LocalReady),
+			style.boolCell(node.Usable),
+			style.boolCell(node.ControlOnline),
+			style.boolCell(node.DataPlaneReachable),
+			style.timeCell(formatUnix(node.UpdatedAtUnix)),
 		})
 	}
 	renderTable(w, style, headers, rows)

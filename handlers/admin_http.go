@@ -54,14 +54,15 @@ func adminHTTPAuth(token string, next http.Handler) http.Handler {
 }
 
 var adminReadActions = map[string]bool{
-	"gateway_list": true,
-	"list_gateway": true,
-	"list_device":  true,
-	"list_devices": true,
-	"list_users":   true,
-	"dns_domains":  true,
-	"dns_snapshot": true,
-	"version":      true,
+	"gateway_list":   true,
+	"list_gateway":   true,
+	"exit_node_list": true,
+	"list_device":    true,
+	"list_devices":   true,
+	"list_users":     true,
+	"dns_domains":    true,
+	"dns_snapshot":   true,
+	"version":        true,
 }
 
 func adminHTTPHandler(ctrl *control.Controller, version string) http.Handler {

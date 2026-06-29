@@ -85,6 +85,42 @@ func executeAdminRequest(ctrl *control.Controller, version string, req adminRequ
 		return adminResponse{OK: true}
 	case "list_gateway", "gateway_list":
 		return adminResponse{OK: true, Gateways: ctrl.ListGateways()}
+	case "exit_node_list":
+		return adminResponse{OK: true, ExitNodes: ctrl.ListExitNodes(strings.TrimSpace(req.UserID))}
+	case "exit_node_approve":
+		if err := ctrl.ApproveExitNode(strings.TrimSpace(req.UserID), strings.TrimSpace(req.DeviceID)); err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForAuthedDeviceChange(strings.TrimSpace(req.UserID), strings.TrimSpace(req.DeviceID)); pushErr != nil {
+			log.Errorf("BuildPushDeviceListPacketsForAuthedDeviceChange error: %v", pushErr)
+		} else {
+			for _, push := range pushPackets {
+				if push == nil || push.DstIP == nil {
+					continue
+				}
+				if err := quicStreams.writeToRoute(push.RouteNetworkKey, util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+				}
+			}
+		}
+		return adminResponse{OK: true, ExitNodes: ctrl.ListExitNodes(strings.TrimSpace(req.UserID))}
+	case "exit_node_revoke":
+		if err := ctrl.RevokeExitNode(strings.TrimSpace(req.UserID), strings.TrimSpace(req.DeviceID)); err != nil {
+			return adminResponse{OK: false, Error: err.Error()}
+		}
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForAuthedDeviceChange(strings.TrimSpace(req.UserID), strings.TrimSpace(req.DeviceID)); pushErr != nil {
+			log.Errorf("BuildPushDeviceListPacketsForAuthedDeviceChange error: %v", pushErr)
+		} else {
+			for _, push := range pushPackets {
+				if push == nil || push.DstIP == nil {
+					continue
+				}
+				if err := quicStreams.writeToRoute(push.RouteNetworkKey, util.IpToUint32(push.DstIP), push.Marshal()); err != nil {
+					log.Warnf("PushDeviceList dispatch failed: %s err=%v", push.DstIP, err)
+				}
+			}
+		}
+		return adminResponse{OK: true, ExitNodes: ctrl.ListExitNodes(strings.TrimSpace(req.UserID))}
 	case "list_device", "list_devices":
 		userID := strings.TrimSpace(req.UserID)
 		if userID == "" {

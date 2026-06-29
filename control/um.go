@@ -570,6 +570,17 @@ func (m *UserManager) ListAuthedDevicesByUser(userID string) []UMAuthDevice {
 	return devices
 }
 
+func (m *UserManager) ListAuthedDevices() []UMAuthDevice {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	devices := make([]UMAuthDevice, 0, len(m.authedDevices))
+	for _, record := range m.authedDevices {
+		devices = append(devices, record)
+	}
+	return devices
+}
+
 func (m *UserManager) ExtendAuthedDeviceExpiry(
 	userID string,
 	groupName string,

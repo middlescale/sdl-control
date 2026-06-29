@@ -163,4 +163,6 @@ type ClientStatusInfo struct {
 	IsCone             bool
 	PunchTriggerReason string
 	UpdateTime         int64 // Unix时间戳 (timestamp)
+	ExitNodeAdvertised bool
+	ExitNodeLocalReady bool
 }

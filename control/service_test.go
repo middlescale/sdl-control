@@ -781,6 +781,53 @@ func TestBuildPunchStartPacketsFromStatusSkipsStatusUpdateWhenOneSidedP2PExists(
 	}
 }
 
+func TestBuildPunchStartPacketsFromStatusSkipsStatusReportOnly(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:             srcReg.GetVirtualIp(),
+		NatType:            pb.PunchNatType_Cone,
+		PunchTriggerReason: pb.PunchTriggerReason_StatusReportOnly,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(startPackets) != 0 {
+		t.Fatalf("expected status-only report to suppress punch, got %d packets", len(startPackets))
+	}
+}
+
 func TestBuildPunchStartPacketsFromStatusAllowsRouteTimeoutRecoveryWhenOneSidedP2PExists(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -1716,6 +1763,46 @@ func TestBuildPushDeviceListPacketsForPeerChange(t *testing.T) {
 	item := list.GetDeviceInfoList()[0]
 	if item.GetVirtualIp() != resp2.GetVirtualIp() || item.GetDeviceId() != "dev-b" {
 		t.Fatalf("unexpected device info item: %+v", item)
+	}
+}
+
+func TestBuildPushDeviceListPacketsForAuthedDeviceChange(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+
+	respA := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	respB := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+
+	record, ok := ctrl.UMGetAuthedDevice("ms.net", "dev-a")
+	if !ok {
+		t.Fatalf("authed device not found")
+	}
+	ctrl.exitNodeMu.Lock()
+	ctrl.exitNodeApproved[record.UserID] = map[string]bool{"dev-a": true}
+	ctrl.exitNodeMu.Unlock()
+
+	packets, err := ctrl.BuildPushDeviceListPacketsForAuthedDeviceChange(record.UserID, "dev-a")
+	if err != nil {
+		t.Fatalf("BuildPushDeviceListPacketsForAuthedDeviceChange failed: %v", err)
+	}
+	if len(packets) != 1 {
+		t.Fatalf("expected 1 push packet, got %d", len(packets))
+	}
+	packet := packets[0]
+	if !packet.DstIP.Equal(util.Uint32ToIP(respB.GetVirtualIp())) {
+		t.Fatalf("unexpected dst ip: %v", packet.DstIP)
+	}
+
+	var list pb.DeviceList
+	if err := proto.Unmarshal(packet.Payload, &list); err != nil {
+		t.Fatalf("unmarshal device list failed: %v", err)
+	}
+	if len(list.GetDeviceInfoList()) != 1 {
+		t.Fatalf("unexpected device list length: %d", len(list.GetDeviceInfoList()))
+	}
+	item := list.GetDeviceInfoList()[0]
+	if item.GetVirtualIp() != respA.GetVirtualIp() || !item.GetExitNodeApproved() {
+		t.Fatalf("unexpected exit-node view: %+v", item)
 	}
 }
 
@@ -2717,6 +2804,144 @@ func TestGatewayApprovalPersistsAcrossControllerRestart(t *testing.T) {
 	defer reloaded.Stop()
 	if !reloaded.isGatewayAllowed("gw-persist", "127.0.0.1:51821") {
 		t.Fatalf("expected approved gateway to persist across restart")
+	}
+}
+
+func TestExitNodeApprovalRequiresDatabase(t *testing.T) {
+	cfg := &config.Config{
+		Gateway:             net.ParseIP("10.26.0.1"),
+		Domain:              "ms.net",
+		Netmask:             "255.255.255.0",
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	}
+	ctrl := newControllerWithConfig(t, cfg)
+	defer ctrl.Stop()
+	user, err := ctrl.UMCreateUserWithID("sdl-user-a", "default.ms.net")
+	if err != nil {
+		t.Fatalf("UMCreateUserWithID failed: %v", err)
+	}
+	ticket, err := ctrl.UMIssueDeviceTicket(user.UserID, "default.ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+	}
+	if _, err := ctrl.UMAuthDevice(user.UserID, "default.ms.net", "dev-exit", ticket.Ticket, []byte("pk-dev-exit")); err != nil {
+		t.Fatalf("UMAuthDevice failed: %v", err)
+	}
+	if err := ctrl.ApproveExitNode(user.UserID, "dev-exit"); err == nil || !strings.Contains(err.Error(), "requires DATABASE_URL") {
+		t.Fatalf("expected DATABASE_URL error, got %v", err)
+	}
+	list := ctrl.ListExitNodes(user.UserID)
+	if len(list) != 1 {
+		t.Fatalf("expected one exit-node candidate, got %+v", list)
+	}
+	if list[0].Approved || list[0].UserID != user.UserID || list[0].DeviceID != "dev-exit" {
+		t.Fatalf("unexpected exit-node candidate view: %+v", list[0])
+	}
+}
+
+func TestExitNodeStatusMarksAdminViewAndDeviceListUsable(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain: "ms.net",
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"default": {Gateway: net.ParseIP("10.26.0.1"), Netmask: "255.255.255.0"},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	user, err := ctrl.UMCreateUserWithID("sdl-exit-user", "default.ms.net")
+	if err != nil {
+		t.Fatalf("UMCreateUserWithID failed: %v", err)
+	}
+	for _, deviceID := range []string{"dev-a", "dev-b"} {
+		ticket, err := ctrl.UMIssueDeviceTicket(user.UserID, "default.ms.net", time.Minute)
+		if err != nil {
+			t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+		}
+		if _, err := ctrl.UMAuthDevice(user.UserID, "default.ms.net", deviceID, ticket.Ticket, []byte("pk-"+deviceID)); err != nil {
+			t.Fatalf("UMAuthDevice failed: %v", err)
+		}
+	}
+
+	regA := mustRegister(t, ctrl, &pb.RegistrationRequest{
+		Token:        "default.ms.net",
+		Name:         "node-a",
+		DeviceId:     "dev-a",
+		DevicePubKey: []byte("pk-dev-a"),
+		OnlineKxPub:  testOnlineKxPub("dev-a"),
+	}, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12001})
+	regB := mustRegister(t, ctrl, &pb.RegistrationRequest{
+		Token:        "default.ms.net",
+		Name:         "node-b",
+		DeviceId:     "dev-b",
+		DevicePubKey: []byte("pk-dev-b"),
+		OnlineKxPub:  testOnlineKxPub("dev-b"),
+	}, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12002})
+
+	ctrl.exitNodeMu.Lock()
+	ctrl.exitNodeApproved[user.UserID] = map[string]bool{"dev-b": true}
+	ctrl.exitNodeMu.Unlock()
+	status := &pb.ClientStatusInfo{
+		Source:               regB.GetVirtualIp(),
+		PreferredChannelMode: pb.ChannelMode_CHANNEL_MODE_AUTO,
+		ExitNodeAdvertised:   true,
+		ExitNodeLocalReady:   true,
+	}
+	payload, err := proto.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal ClientStatusInfo failed: %v", err)
+	}
+	changed, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+		AppProto: protocol.AppProtoClientStatusInfo,
+		SrcIP:    util.Uint32ToIP(regB.GetVirtualIp()),
+		Payload:  payload,
+	})
+	if err != nil {
+		t.Fatalf("HandleClientStatusInfoPacket failed: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected exit-node status change to request device-list push")
+	}
+
+	adminList := ctrl.ListExitNodes(user.UserID)
+	if len(adminList) != 2 {
+		t.Fatalf("expected both user devices in exit-node list, got %+v", adminList)
+	}
+	var adminB *ExitNodeAdminView
+	for i := range adminList {
+		if adminList[i].DeviceID == "dev-b" {
+			adminB = &adminList[i]
+			break
+		}
+	}
+	if adminB == nil || !adminB.Advertised || !adminB.Approved || !adminB.Usable {
+		t.Fatalf("expected dev-b to be advertised, approved, and usable, got %+v", adminB)
+	}
+
+	packet, err := ctrl.HandlePullDeviceListPacket(&protocol.Packet{
+		AppProto: protocol.AppProtoPullDeviceList,
+		SrcIP:    util.Uint32ToIP(regA.GetVirtualIp()),
+		DstIP:    util.Uint32ToIP(regA.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("HandlePullDeviceListPacket failed: %v", err)
+	}
+	var list pb.DeviceList
+	if err := proto.Unmarshal(packet.Payload, &list); err != nil {
+		t.Fatalf("unmarshal device list failed: %v", err)
+	}
+	if len(list.GetDeviceInfoList()) != 1 {
+		t.Fatalf("expected node-a to see node-b only, got %+v", list.GetDeviceInfoList())
+	}
+	peer := list.GetDeviceInfoList()[0]
+	if peer.GetDeviceId() != "dev-b" || !peer.GetExitNodeAdvertised() || !peer.GetExitNodeApproved() || !peer.GetExitNodeUsable() {
+		t.Fatalf("expected node-b exit-node flags in device list, got %+v", peer)
 	}
 }
 

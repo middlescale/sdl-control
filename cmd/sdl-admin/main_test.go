@@ -92,6 +92,21 @@ func TestParseGatewayDelist(t *testing.T) {
 	}
 }
 
+func TestParseExitNodeCommands(t *testing.T) {
+	listReq := parseExitNode([]string{"list", "-u", "sdl-user-1"})
+	if listReq.Action != "exit_node_list" || listReq.UserID != "sdl-user-1" {
+		t.Fatalf("unexpected exit-node list request: %+v", listReq)
+	}
+	approveReq := parseExitNode([]string{"approve", "--id", "sdl-user-1", "--device-id", "dev-1"})
+	if approveReq.Action != "exit_node_approve" || approveReq.UserID != "sdl-user-1" || approveReq.DeviceID != "dev-1" {
+		t.Fatalf("unexpected exit-node approve request: %+v", approveReq)
+	}
+	revokeReq := parseExitNode([]string{"revoke", "-u", "sdl-user-1", "-d", "dev-1"})
+	if revokeReq.Action != "exit_node_revoke" || revokeReq.UserID != "sdl-user-1" || revokeReq.DeviceID != "dev-1" {
+		t.Fatalf("unexpected exit-node revoke request: %+v", revokeReq)
+	}
+}
+
 func TestWriteResponseVersion(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -100,6 +115,33 @@ func TestWriteResponseVersion(t *testing.T) {
 	}
 	if got := strings.TrimSpace(stdout.String()); got != "0.7.3-test" {
 		t.Fatalf("unexpected version output: %q", got)
+	}
+}
+
+func TestWriteResponseExitNodeList(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	resp := adminResponse{
+		OK: true,
+		ExitNodes: []exitNodeInfo{{
+			UserID:        "sdl-user-1",
+			Group:         "default.ms.net",
+			Name:          "exit-node",
+			DeviceID:      "dev-1",
+			VirtualIP:     "10.26.0.2",
+			Approved:      true,
+			ControlOnline: true,
+			UpdatedAtUnix: 1_750_000_000,
+		}},
+	}
+	if err := writeResponse(&stdout, &stderr, "exit_node_list", resp); err != nil {
+		t.Fatalf("writeResponse failed: %v", err)
+	}
+	out := stdout.String()
+	for _, want := range []string{"Exit nodes (1)", "USER ID", "APPROVED", "sdl-user-1", "exit-node", "dev-1", "10.26.0.2"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected output to contain %q, got:\n%s", want, out)
+		}
 	}
 }
 
