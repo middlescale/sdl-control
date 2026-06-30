@@ -525,6 +525,59 @@ func TestBuildPunchStartPackets(t *testing.T) {
 	}
 }
 
+func TestBuildPunchStartPacketsSkipsForcedRelayClient(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	status := &pb.ClientStatusInfo{
+		Source:               srcReg.GetVirtualIp(),
+		PreferredChannelMode: pb.ChannelMode_CHANNEL_MODE_RELAY,
+	}
+	statusPayload, err := proto.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal status failed: %v", err)
+	}
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoClientStatusInfo,
+		SrcIP:    util.Uint32ToIP(srcReg.GetVirtualIp()),
+		Payload:  statusPayload,
+	}); err != nil {
+		t.Fatalf("HandleClientStatusInfoPacket failed: %v", err)
+	}
+	req := &pb.PunchRequest{
+		SessionId: 3001,
+		Source:    srcReg.GetVirtualIp(),
+		Target:    dstReg.GetVirtualIp(),
+		Attempt:   1,
+		TimeoutMs: 2500,
+		SourceEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 3333},
+		},
+		TargetEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 4444},
+		},
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal punch request failed: %v", err)
+	}
+	packets, err := ctrl.BuildPunchStartPackets(&protocol.Packet{
+		Proto:    protocol.ProtocolService,
+		AppProto: protocol.AppProtoPunchRequest,
+		SrcIP:    util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP:    util.Uint32ToIP(srcReg.GetVirtualGateway()),
+		Payload:  payload,
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPackets failed: %v", err)
+	}
+	if len(packets) != 0 {
+		t.Fatalf("expected forced relay client to suppress punch start, got %d packets", len(packets))
+	}
+}
+
 func TestHandlePunchAckAndResultInitializeSessionMaps(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()
@@ -825,6 +878,54 @@ func TestBuildPunchStartPacketsFromStatusSkipsStatusReportOnly(t *testing.T) {
 	}
 	if len(startPackets) != 0 {
 		t.Fatalf("expected status-only report to suppress punch, got %d packets", len(startPackets))
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusSkipsForcedRelayClient(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	dstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	srcStatus := &pb.ClientStatusInfo{
+		Source:               srcReg.GetVirtualIp(),
+		NatType:              pb.PunchNatType_Cone,
+		PunchTriggerReason:   pb.PunchTriggerReason_PunchTriggerManualRequest,
+		PreferredChannelMode: pb.ChannelMode_CHANNEL_MODE_RELAY,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001},
+		},
+	}
+	dstStatus := &pb.ClientStatusInfo{
+		Source:  dstReg.GetVirtualIp(),
+		NatType: pb.PunchNatType_Cone,
+		PublicUdpEndpoints: []*pb.PunchEndpoint{
+			{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002},
+		},
+	}
+	srcPayload, err := proto.Marshal(srcStatus)
+	if err != nil {
+		t.Fatalf("marshal src status failed: %v", err)
+	}
+	dstPayload, err := proto.Marshal(dstStatus)
+	if err != nil {
+		t.Fatalf("marshal dst status failed: %v", err)
+	}
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()), Payload: srcPayload}); err != nil {
+		t.Fatalf("update src status failed: %v", err)
+	}
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{Proto: protocol.ProtocolService, AppProto: protocol.AppProtoClientStatusInfo, SrcIP: util.Uint32ToIP(dstReg.GetVirtualIp()), Payload: dstPayload}); err != nil {
+		t.Fatalf("update dst status failed: %v", err)
+	}
+	startPackets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(startPackets) != 0 {
+		t.Fatalf("expected forced relay client to suppress status-triggered punch, got %d packets", len(startPackets))
 	}
 }
 

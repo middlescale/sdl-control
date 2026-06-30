@@ -1497,6 +1497,9 @@ func shouldSuppressPunchStartForStatusUpdate(
 	targetClient ClientInfo,
 	targetIP uint32,
 ) bool {
+	if clientsPreferRelay(srcClient, targetClient) {
+		return true
+	}
 	return clientsHaveAnyP2PPath(srcClient, srcIP, targetClient, targetIP)
 }
 
@@ -1506,7 +1509,15 @@ func shouldSuppressPunchStartForOtherTrigger(
 	targetClient ClientInfo,
 	targetIP uint32,
 ) bool {
+	if clientsPreferRelay(srcClient, targetClient) {
+		return true
+	}
 	return clientsHaveMutualP2PPath(srcClient, srcIP, targetClient, targetIP)
+}
+
+func clientsPreferRelay(srcClient ClientInfo, targetClient ClientInfo) bool {
+	return srcClient.PreferredChannelMode == pb.ChannelMode_CHANNEL_MODE_RELAY ||
+		targetClient.PreferredChannelMode == pb.ChannelMode_CHANNEL_MODE_RELAY
 }
 
 func (c *Controller) HandlePunchRequestPacket(request *protocol.Packet) (*protocol.Packet, error) {
@@ -1589,11 +1600,16 @@ func (c *Controller) BuildPunchStartPacketsInNetwork(request *protocol.Packet, n
 	if req.GetSessionId() == 0 || req.GetAttempt() == 0 {
 		return nil, fmt.Errorf("invalid punch request, session_id and attempt must be non-zero")
 	}
-	if _, ok := c.nc.FindClientByVirtualIPInNetwork(networkKey, sourceIP); !ok {
+	sourceClient, ok := c.nc.FindClientByVirtualIPInNetwork(networkKey, sourceIP)
+	if !ok {
 		return nil, fmt.Errorf("punch source %s not registered", util.Uint32ToIP(sourceIP))
 	}
-	if _, ok := c.nc.FindClientByVirtualIPInNetwork(networkKey, req.GetTarget()); !ok {
+	targetClient, ok := c.nc.FindClientByVirtualIPInNetwork(networkKey, req.GetTarget())
+	if !ok {
 		return nil, fmt.Errorf("punch target %s not registered", util.Uint32ToIP(req.GetTarget()))
+	}
+	if clientsPreferRelay(sourceClient, targetClient) {
+		return nil, nil
 	}
 	sourceStart := &pb.PunchStart{
 		SessionId:               req.GetSessionId(),
