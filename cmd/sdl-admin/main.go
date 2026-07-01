@@ -868,21 +868,17 @@ func writeExitNodeTable(w io.Writer, exitNodes []exitNodeInfo) {
 		fmt.Fprintln(w, style.muted("  (none)"))
 		return
 	}
-	headers := []string{"USER ID", "GROUP", "NAME", "DEVICE ID", "VIRTUAL IP", "APPROVED", "ADVERTISED", "LOCAL READY", "USABLE", "CONTROL", "DATA", "UPDATED AT"}
+	headers := []string{"USER ID", "NAME", "DEVICE ID", "VIRTUAL IP", "APPROVED", "READY", "USABLE", "UPDATED AT"}
 	rows := make([][]tableCell, 0, len(exitNodes))
 	for _, node := range exitNodes {
 		rows = append(rows, []tableCell{
 			plainCell(valueOrDash(node.UserID)),
-			plainCell(valueOrDash(node.Group)),
 			plainCell(valueOrDash(node.Name)),
 			plainCell(valueOrDash(node.DeviceID)),
 			plainCell(valueOrDash(node.VirtualIP)),
 			style.boolCell(node.Approved),
-			style.boolCell(node.Advertised),
-			style.boolCell(node.LocalReady),
+			style.boolCell(node.Advertised && node.LocalReady),
 			style.boolCell(node.Usable),
-			style.boolCell(node.ControlOnline),
-			style.boolCell(node.DataPlaneReachable),
 			style.timeCell(formatUnix(node.UpdatedAtUnix)),
 		})
 	}

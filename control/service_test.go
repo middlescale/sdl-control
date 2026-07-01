@@ -2933,11 +2933,8 @@ func TestExitNodeApprovalRequiresDatabase(t *testing.T) {
 		t.Fatalf("expected DATABASE_URL error, got %v", err)
 	}
 	list := ctrl.ListExitNodes(user.UserID)
-	if len(list) != 1 {
-		t.Fatalf("expected one exit-node candidate, got %+v", list)
-	}
-	if list[0].Approved || list[0].UserID != user.UserID || list[0].DeviceID != "dev-exit" {
-		t.Fatalf("unexpected exit-node candidate view: %+v", list[0])
+	if len(list) != 0 {
+		t.Fatalf("expected no exit-node records before advertise or approval, got %+v", list)
 	}
 }
 
@@ -3011,8 +3008,15 @@ func TestExitNodeStatusMarksAdminViewAndDeviceListUsable(t *testing.T) {
 	}
 
 	adminList := ctrl.ListExitNodes(user.UserID)
-	if len(adminList) != 2 {
-		t.Fatalf("expected both user devices in exit-node list, got %+v", adminList)
+	if len(adminList) != 1 {
+		t.Fatalf("expected user exit-node list to include exit-node records only, got %+v", adminList)
+	}
+	defaultAdminList := ctrl.ListExitNodes("")
+	if len(defaultAdminList) != 1 {
+		t.Fatalf("expected default exit-node list to include advertised candidates only, got %+v", defaultAdminList)
+	}
+	if defaultAdminList[0].DeviceID != "dev-b" || !defaultAdminList[0].Advertised || !defaultAdminList[0].Approved || !defaultAdminList[0].Usable {
+		t.Fatalf("expected default list to include usable dev-b candidate, got %+v", defaultAdminList[0])
 	}
 	var adminB *ExitNodeAdminView
 	for i := range adminList {
@@ -3043,6 +3047,71 @@ func TestExitNodeStatusMarksAdminViewAndDeviceListUsable(t *testing.T) {
 	peer := list.GetDeviceInfoList()[0]
 	if peer.GetDeviceId() != "dev-b" || !peer.GetExitNodeAdvertised() || !peer.GetExitNodeApproved() || !peer.GetExitNodeUsable() {
 		t.Fatalf("expected node-b exit-node flags in device list, got %+v", peer)
+	}
+}
+
+func TestExitNodeListIncludesUnapprovedAdvertisedCandidates(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain: "ms.net",
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {
+				Groups: map[string]config.GroupConfig{
+					"default": {Gateway: net.ParseIP("10.26.0.1"), Netmask: "255.255.255.0"},
+				},
+			},
+		},
+		DefaultGatewayID:    "gw-default",
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	user, err := ctrl.UMCreateUserWithID("sdl-exit-candidate-user", "default.ms.net")
+	if err != nil {
+		t.Fatalf("UMCreateUserWithID failed: %v", err)
+	}
+	ticket, err := ctrl.UMIssueDeviceTicket(user.UserID, "default.ms.net", time.Minute)
+	if err != nil {
+		t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+	}
+	if _, err := ctrl.UMAuthDevice(user.UserID, "default.ms.net", "dev-exit", ticket.Ticket, []byte("pk-dev-exit")); err != nil {
+		t.Fatalf("UMAuthDevice failed: %v", err)
+	}
+	reg := mustRegister(t, ctrl, &pb.RegistrationRequest{
+		Token:        "default.ms.net",
+		Name:         "node-exit",
+		DeviceId:     "dev-exit",
+		DevicePubKey: []byte("pk-dev-exit"),
+		OnlineKxPub:  testOnlineKxPub("dev-exit"),
+	}, &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12003})
+
+	status := &pb.ClientStatusInfo{
+		Source:               reg.GetVirtualIp(),
+		PreferredChannelMode: pb.ChannelMode_CHANNEL_MODE_AUTO,
+		ExitNodeAdvertised:   true,
+		ExitNodeLocalReady:   true,
+	}
+	payload, err := proto.Marshal(status)
+	if err != nil {
+		t.Fatalf("marshal ClientStatusInfo failed: %v", err)
+	}
+	if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+		AppProto: protocol.AppProtoClientStatusInfo,
+		SrcIP:    util.Uint32ToIP(reg.GetVirtualIp()),
+		Payload:  payload,
+	}); err != nil {
+		t.Fatalf("HandleClientStatusInfoPacket failed: %v", err)
+	}
+
+	adminList := ctrl.ListExitNodes("")
+	if len(adminList) != 1 {
+		t.Fatalf("expected default list to include unapproved exit-node candidate, got %+v", adminList)
+	}
+	candidate := adminList[0]
+	if candidate.UserID != user.UserID || candidate.DeviceID != "dev-exit" || !candidate.Advertised || !candidate.LocalReady {
+		t.Fatalf("unexpected candidate view: %+v", candidate)
+	}
+	if candidate.Approved || candidate.Usable {
+		t.Fatalf("unapproved candidate should not be approved or usable: %+v", candidate)
 	}
 }
 

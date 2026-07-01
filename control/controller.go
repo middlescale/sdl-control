@@ -2559,7 +2559,7 @@ func (c *Controller) ListExitNodes(userID string) []ExitNodeAdminView {
 			continue
 		}
 		isApproved := approved[record.UserID][record.DeviceID]
-		if userID == "" && !isApproved {
+		if !isApproved {
 			continue
 		}
 		name := strings.TrimSpace(record.DisplayName)
@@ -2588,7 +2588,7 @@ func (c *Controller) ListExitNodes(userID string) []ExitNodeAdminView {
 			}
 		}
 	}
-	c.mergeExitNodeRuntimeViews(viewsByKey)
+	c.mergeExitNodeRuntimeViews(viewsByKey, userID)
 
 	views := make([]ExitNodeAdminView, 0, len(viewsByKey))
 	for _, view := range viewsByKey {
@@ -2675,15 +2675,28 @@ func (c *Controller) isAuthedDeviceForUser(userID, deviceID string) bool {
 	return false
 }
 
-func (c *Controller) mergeExitNodeRuntimeViews(viewsByKey map[string]ExitNodeAdminView) {
+func (c *Controller) mergeExitNodeRuntimeViews(viewsByKey map[string]ExitNodeAdminView, userIDFilter string) {
+	userIDFilter = strings.TrimSpace(userIDFilter)
+	approved := c.exitNodeApprovedSnapshot()
 	c.nc.VirtualNetwork.mutex.RLock()
 	defer c.nc.VirtualNetwork.mutex.RUnlock()
 	for _, network := range c.nc.VirtualNetwork.data {
 		for ip, client := range network.Clients {
+			if userIDFilter != "" && client.UserID != userIDFilter {
+				continue
+			}
 			key := client.UserID + "\x00" + client.DeviceId
 			view, ok := viewsByKey[key]
-			if !ok {
+			isApproved := approved[client.UserID][client.DeviceId]
+			if !ok && !isApproved && !clientExitNodeAdvertised(client) && !clientExitNodeLocalReady(client) {
 				continue
+			}
+			if !ok {
+				view = ExitNodeAdminView{
+					UserID:   client.UserID,
+					DeviceID: client.DeviceId,
+					Approved: isApproved,
+				}
 			}
 			if strings.TrimSpace(client.Name) != "" {
 				view.Name = client.Name
@@ -2693,6 +2706,7 @@ func (c *Controller) mergeExitNodeRuntimeViews(viewsByKey map[string]ExitNodeAdm
 			}
 			view.VirtualIP = util.Uint32ToIP(ip).String()
 			view.Advertised = clientExitNodeAdvertised(client)
+			view.Approved = isApproved
 			view.LocalReady = clientExitNodeLocalReady(client)
 			view.ControlOnline = client.ControlOnline
 			view.DataPlaneReachable = client.DataPlaneReachable
