@@ -130,12 +130,10 @@ func (c *Controller) decorateDebugCollectResult(packet *protocol.Packet, resp *p
 		VirtualIP:         packet.SrcIP.String(),
 	}
 	ip := util.IpToUint32(packet.SrcIP)
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
-	for _, network := range c.nc.VirtualNetwork.data {
+	c.nc.forEachVirtualNetworkRead("", func(_ string, network *NetworkInfo) bool {
 		client, ok := network.Clients[ip]
 		if !ok {
-			continue
+			return true
 		}
 		authGroup := clientAuthGroup(client, network.Group)
 		result.Group = authGroup
@@ -147,8 +145,8 @@ func (c *Controller) decorateDebugCollectResult(packet *protocol.Packet, resp *p
 		} else if userID, ok := c.userIDForAuthedDevice(authGroup, client.DeviceId); ok {
 			result.UserID = userID
 		}
-		return result
-	}
+		return false
+	})
 	return result
 }
 
@@ -165,9 +163,7 @@ func (c *Controller) findOnlineDeviceByName(name, userID, group string) (DeviceA
 		networkKey string
 	}
 	var matches []match
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
-	for _, network := range c.nc.VirtualNetwork.data {
+	c.nc.forEachVirtualNetworkRead("", func(_ string, network *NetworkInfo) bool {
 		for ip, client := range network.Clients {
 			authGroup := clientAuthGroup(client, network.Group)
 			if group != "" && !strings.EqualFold(authGroup, group) {
@@ -197,7 +193,8 @@ func (c *Controller) findOnlineDeviceByName(name, userID, group string) (DeviceA
 				},
 			})
 		}
-	}
+		return true
+	})
 	if len(matches) == 0 {
 		return DeviceAdminView{}, 0, "", fmt.Errorf("no online device matched name %q", name)
 	}

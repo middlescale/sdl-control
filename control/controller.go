@@ -537,13 +537,13 @@ func (c *Controller) HandleRegistrationPacketWithVirtualIPAndCapabilities(
 	registrationResp.VirtualNetmask = util.MaskToUint32(netmask)
 	registrationResp.DnsProfile = c.BuildClientDNSProfile(authGroup)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.nc.VirtualNetwork.mutex.Lock()
+	defer c.nc.VirtualNetwork.mutex.Unlock()
 
-	netInfo, netInfoExist := c.nc.VirtualNetwork.Get(networkIdentity.Key())
+	netInfo, netInfoExist := c.nc.VirtualNetwork.data[networkIdentity.Key()]
 	if !netInfoExist {
 		netInfo = NewNetworkInfo(networkIdentity.Key(), netmask, net.IP(gateway), c.reservedServiceIPs(authGroup))
-		c.nc.VirtualNetwork.Set(networkIdentity.Key(), netInfo)
+		c.nc.VirtualNetwork.data[networkIdentity.Key()] = netInfo
 	}
 	virtualIP, oldIP, err := c.nc.generateIP(
 		netInfo,
@@ -635,37 +635,31 @@ func (c *Controller) HandleDeviceRenamePacket(request *protocol.Packet) (*protoc
 	}
 	srcIP := util.IpToUint32(request.SrcIP)
 	groupName := ""
-	c.nc.VirtualNetwork.mutex.RLock()
-	for key, network := range c.nc.VirtualNetwork.data {
-		if strings.TrimSpace(request.RouteNetworkKey) != "" && key != request.RouteNetworkKey {
-			continue
-		}
+	renameReason := ""
+	c.nc.forEachVirtualNetworkRead(request.RouteNetworkKey, func(_ string, network *NetworkInfo) bool {
 		client, ok := network.Clients[srcIP]
 		if !ok {
-			continue
+			return true
 		}
 		if client.DeviceId != deviceID {
-			c.nc.VirtualNetwork.mutex.RUnlock()
-			resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-				RequestId: req.GetRequestId(),
-				Ok:        false,
-				Reason:    "device mismatch",
-			})
-			return resp, 0, err
+			renameReason = "device mismatch"
+			return false
 		}
 		if c.networkHasDuplicateDeviceNameLocked(network, deviceID, newName) {
-			c.nc.VirtualNetwork.mutex.RUnlock()
-			resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
-				RequestId: req.GetRequestId(),
-				Ok:        false,
-				Reason:    "device name already exists",
-			})
-			return resp, 0, err
+			renameReason = "device name already exists"
+			return false
 		}
 		groupName = clientAuthGroup(client, network.Group)
-		break
+		return false
+	})
+	if renameReason != "" {
+		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
+			RequestId: req.GetRequestId(),
+			Ok:        false,
+			Reason:    renameReason,
+		})
+		return resp, 0, err
 	}
-	c.nc.VirtualNetwork.mutex.RUnlock()
 	if groupName == "" {
 		resp, err := c.buildServicePacket(request, protocol.AppProtoDeviceRenameResponse, &pb.DeviceRenameResponse{
 			RequestId: req.GetRequestId(),
@@ -719,8 +713,8 @@ func normalizeRenameName(newName string) (string, error) {
 }
 
 func (c *Controller) clearStaleClientStateByDeviceID(authGroup, deviceID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.nc.VirtualNetwork.mutex.Lock()
+	defer c.nc.VirtualNetwork.mutex.Unlock()
 
 	now := time.Now().Unix()
 	for _, netInfo := range c.nc.VirtualNetwork.data {
@@ -757,8 +751,8 @@ func (c *Controller) removeAuthedDeviceRuntimeState(records []UMAuthDevice) {
 		remove[authedDeviceKey(record.GroupName, record.DeviceID)] = struct{}{}
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.nc.VirtualNetwork.mutex.Lock()
+	defer c.nc.VirtualNetwork.mutex.Unlock()
 	for networkKey, netInfo := range c.nc.VirtualNetwork.data {
 		networkChanged := false
 		for virtualIP, clientInfo := range netInfo.Clients {
@@ -781,8 +775,8 @@ func (c *Controller) updateAuthedDeviceRuntimeName(record UMAuthDevice) {
 	if displayName == "" {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.nc.VirtualNetwork.mutex.Lock()
+	defer c.nc.VirtualNetwork.mutex.Unlock()
 	for _, netInfo := range c.nc.VirtualNetwork.data {
 		networkChanged := false
 		for virtualIP, clientInfo := range netInfo.Clients {
@@ -901,20 +895,16 @@ func (c *Controller) BuildPushDeviceListPacketsForAuthedDeviceChange(userID, dev
 		return nil, nil
 	}
 	var selectedIP uint32
-	c.nc.VirtualNetwork.mutex.RLock()
-	for _, network := range c.nc.VirtualNetwork.data {
+	c.nc.forEachVirtualNetworkRead("", func(_ string, network *NetworkInfo) bool {
 		for _, client := range network.Clients {
 			if client.UserID != userID || client.DeviceId != deviceID || !client.ControlOnline {
 				continue
 			}
 			selectedIP = client.VirtualIp
-			break
+			return false
 		}
-		if selectedIP != 0 {
-			break
-		}
-	}
-	c.nc.VirtualNetwork.mutex.RUnlock()
+		return true
+	})
 	if selectedIP != 0 {
 		return c.BuildPushDeviceListPacketsForPeerChange(selectedIP)
 	}
@@ -922,22 +912,20 @@ func (c *Controller) BuildPushDeviceListPacketsForAuthedDeviceChange(userID, dev
 }
 
 func (c *Controller) BuildPushDeviceListPacketsForPeerChangeInNetwork(networkKey string, changedIP uint32) ([]*protocol.Packet, error) {
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
-
-	for key, network := range c.nc.VirtualNetwork.data {
-		if strings.TrimSpace(networkKey) != "" && key != networkKey {
-			continue
-		}
+	var packets []*protocol.Packet
+	var buildErr error
+	found := false
+	c.nc.forEachVirtualNetworkRead(networkKey, func(_ string, network *NetworkInfo) bool {
 		changedClient, ok := network.Clients[changedIP]
 		if !ok {
-			continue
+			return true
 		}
+		found = true
 		if !changedClient.ControlOnline {
-			return nil, nil
+			return false
 		}
 		changedScope := clientNetworkScope(changedClient, network.Group)
-		packets := make([]*protocol.Packet, 0, len(network.Clients))
+		packets = make([]*protocol.Packet, 0, len(network.Clients))
 		for targetIP, targetClient := range network.Clients {
 			if targetIP == changedIP || !targetClient.ControlOnline {
 				continue
@@ -958,21 +946,26 @@ func (c *Controller) BuildPushDeviceListPacketsForPeerChangeInNetwork(networkKey
 				gatewayPolicyRev,
 			)
 			if err != nil {
-				return nil, err
+				buildErr = err
+				return false
 			}
 			packets = append(packets, packet)
 		}
+		return false
+	})
+	if buildErr != nil {
+		return nil, buildErr
+	}
+	if found {
 		return packets, nil
 	}
 	return nil, nil
 }
 
 func (c *Controller) BuildPushDeviceListPacketsForGatewayChange() ([]*protocol.Packet, error) {
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
-
 	var packets []*protocol.Packet
-	for _, network := range c.nc.VirtualNetwork.data {
+	var buildErr error
+	c.nc.forEachVirtualNetworkRead("", func(_ string, network *NetworkInfo) bool {
 		for targetIP, targetClient := range network.Clients {
 			if !targetClient.ControlOnline {
 				continue
@@ -990,10 +983,15 @@ func (c *Controller) BuildPushDeviceListPacketsForGatewayChange() ([]*protocol.P
 				gatewayPolicyRev,
 			)
 			if err != nil {
-				return nil, err
+				buildErr = err
+				return false
 			}
 			packets = append(packets, packet)
 		}
+		return true
+	})
+	if buildErr != nil {
+		return nil, buildErr
 	}
 	return packets, nil
 }
@@ -1331,15 +1329,12 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 	srcIP := util.IpToUint32(request.SrcIP)
 	now := time.Now()
 	nowMs := now.UnixMilli()
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
-	for key, network := range c.nc.VirtualNetwork.data {
-		if strings.TrimSpace(networkKey) != "" && key != networkKey {
-			continue
-		}
+	var packets []*protocol.Packet
+	var buildErr error
+	c.nc.forEachVirtualNetworkRead(networkKey, func(key string, network *NetworkInfo) bool {
 		srcClient, ok := network.Clients[srcIP]
 		if !ok || !srcClient.ControlOnline || srcClient.ClientStatus == nil {
-			continue
+			return true
 		}
 		for targetIP, targetClient := range network.Clients {
 			if targetIP == srcIP || !targetClient.ControlOnline || targetClient.ClientStatus == nil {
@@ -1435,13 +1430,15 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 			}
 			sourcePayload, err := proto.Marshal(sourceStart)
 			if err != nil {
-				return nil, fmt.Errorf("PunchStart source marshal error: %v", err)
+				buildErr = fmt.Errorf("PunchStart source marshal error: %v", err)
+				return false
 			}
 			targetPayload, err := proto.Marshal(targetStart)
 			if err != nil {
-				return nil, fmt.Errorf("PunchStart target marshal error: %v", err)
+				buildErr = fmt.Errorf("PunchStart target marshal error: %v", err)
+				return false
 			}
-			return []*protocol.Packet{
+			packets = []*protocol.Packet{
 				{
 					Ver:             protocol.V3,
 					Proto:           protocol.ProtocolService,
@@ -1464,10 +1461,15 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 					Payload:         targetPayload,
 					RouteNetworkKey: key,
 				},
-			}, nil
+			}
+			return false
 		}
+		return true
+	})
+	if buildErr != nil {
+		return nil, buildErr
 	}
-	return nil, nil
+	return packets, nil
 }
 
 func clientReportsDirectPeer(client ClientInfo, peerIP uint32) bool {
@@ -2056,6 +2058,23 @@ type NetworkControl struct {
 	PunchPairRetry ExpireMap[string, PunchRetryState]
 }
 
+func (nc *NetworkControl) forEachVirtualNetworkRead(networkKey string, visit func(key string, network *NetworkInfo) bool) {
+	if visit == nil {
+		return
+	}
+	networkKey = strings.TrimSpace(networkKey)
+	nc.VirtualNetwork.mutex.RLock()
+	defer nc.VirtualNetwork.mutex.RUnlock()
+	for key, network := range nc.VirtualNetwork.data {
+		if networkKey != "" && key != networkKey {
+			continue
+		}
+		if !visit(key, network) {
+			return
+		}
+	}
+}
+
 // IpSessionKey is a comparable key for IPSessions.
 // Use string fields because net.IP (a []byte) is not comparable.
 type IpSessionKey struct {
@@ -2420,10 +2439,7 @@ func (c *Controller) ListDevices(userID string) []DeviceAdminView {
 		}
 	}
 
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
-
-	for _, network := range c.nc.VirtualNetwork.data {
+	c.nc.forEachVirtualNetworkRead("", func(_ string, network *NetworkInfo) bool {
 		for ip, client := range network.Clients {
 			authGroup := clientAuthGroup(client, network.Group)
 			key := authGroup + "\x00" + client.DeviceId
@@ -2450,7 +2466,8 @@ func (c *Controller) ListDevices(userID string) []DeviceAdminView {
 			}
 			deviceByGroupDevice[key] = device
 		}
-	}
+		return true
+	})
 
 	devices := make([]DeviceAdminView, 0, len(deviceByGroupDevice))
 	for _, device := range deviceByGroupDevice {
@@ -2629,20 +2646,13 @@ func (c *Controller) enrichDeviceInfoListExitNodes(networkKey string, items []*p
 	if len(items) == 0 {
 		return
 	}
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
 	clientsByIP := map[uint32]ClientInfo{}
-	for key, network := range c.nc.VirtualNetwork.data {
-		if strings.TrimSpace(networkKey) != "" && key != networkKey {
-			continue
-		}
+	c.nc.forEachVirtualNetworkRead(networkKey, func(_ string, network *NetworkInfo) bool {
 		for ip, client := range network.Clients {
 			clientsByIP[ip] = client
 		}
-		if strings.TrimSpace(networkKey) != "" {
-			break
-		}
-	}
+		return strings.TrimSpace(networkKey) == ""
+	})
 	c.enrichDeviceInfoListExitNodesFromClients(items, clientsByIP)
 }
 
@@ -2678,9 +2688,7 @@ func (c *Controller) isAuthedDeviceForUser(userID, deviceID string) bool {
 func (c *Controller) mergeExitNodeRuntimeViews(viewsByKey map[string]ExitNodeAdminView, userIDFilter string) {
 	userIDFilter = strings.TrimSpace(userIDFilter)
 	approved := c.exitNodeApprovedSnapshot()
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
-	for _, network := range c.nc.VirtualNetwork.data {
+	c.nc.forEachVirtualNetworkRead("", func(_ string, network *NetworkInfo) bool {
 		for ip, client := range network.Clients {
 			if userIDFilter != "" && client.UserID != userIDFilter {
 				continue
@@ -2722,7 +2730,8 @@ func (c *Controller) mergeExitNodeRuntimeViews(viewsByKey map[string]ExitNodeAdm
 			}
 			viewsByKey[key] = view
 		}
-	}
+		return true
+	})
 }
 
 func clientExitNodeAdvertised(client ClientInfo) bool {
@@ -3544,17 +3553,15 @@ func (c *Controller) clientOwnsVirtualIP(virtualIP uint32, deviceID string) bool
 }
 
 func (c *Controller) clientOwnsVirtualIPInNetwork(networkKey string, virtualIP uint32, deviceID string) bool {
-	c.nc.VirtualNetwork.mutex.RLock()
-	defer c.nc.VirtualNetwork.mutex.RUnlock()
-	for key, network := range c.nc.VirtualNetwork.data {
-		if strings.TrimSpace(networkKey) != "" && key != networkKey {
-			continue
-		}
+	owns := false
+	c.nc.forEachVirtualNetworkRead(networkKey, func(_ string, network *NetworkInfo) bool {
 		if client, ok := network.Clients[virtualIP]; ok {
-			return client.DeviceId == deviceID
+			owns = client.DeviceId == deviceID
+			return false
 		}
-	}
-	return false
+		return true
+	})
+	return owns
 }
 
 func buildDeviceInfoList(clients map[uint32]ClientInfo, selfIP uint32) []*pb.DeviceInfo {
@@ -3743,21 +3750,18 @@ func (nc *NetworkControl) DeviceListByIP(selfIP uint32) (*pb.DeviceList, bool) {
 }
 
 func (nc *NetworkControl) DeviceListByIPInNetwork(networkKey string, selfIP uint32) (*pb.DeviceList, bool) {
-	nc.VirtualNetwork.mutex.RLock()
-	defer nc.VirtualNetwork.mutex.RUnlock()
-	for key, network := range nc.VirtualNetwork.data {
-		if strings.TrimSpace(networkKey) != "" && key != networkKey {
-			continue
-		}
+	var deviceList *pb.DeviceList
+	nc.forEachVirtualNetworkRead(networkKey, func(_ string, network *NetworkInfo) bool {
 		if _, ok := network.Clients[selfIP]; !ok {
-			continue
+			return true
 		}
-		return &pb.DeviceList{
+		deviceList = &pb.DeviceList{
 			Epoch:          uint32(network.Epoch),
 			DeviceInfoList: buildDeviceInfoList(network.Clients, selfIP),
-		}, true
-	}
-	return nil, false
+		}
+		return false
+	})
+	return deviceList, deviceList != nil
 }
 
 func (nc *NetworkControl) FindClientByVirtualIP(virtualIP uint32) (ClientInfo, bool) {
@@ -3765,18 +3769,18 @@ func (nc *NetworkControl) FindClientByVirtualIP(virtualIP uint32) (ClientInfo, b
 }
 
 func (nc *NetworkControl) FindClientByVirtualIPInNetwork(networkKey string, virtualIP uint32) (ClientInfo, bool) {
-	nc.VirtualNetwork.mutex.RLock()
-	defer nc.VirtualNetwork.mutex.RUnlock()
-	for key, network := range nc.VirtualNetwork.data {
-		if strings.TrimSpace(networkKey) != "" && key != networkKey {
-			continue
-		}
+	var found ClientInfo
+	foundOK := false
+	nc.forEachVirtualNetworkRead(networkKey, func(_ string, network *NetworkInfo) bool {
 		client, ok := network.Clients[virtualIP]
 		if ok {
-			return client, true
+			found = client
+			foundOK = true
+			return false
 		}
-	}
-	return ClientInfo{}, false
+		return true
+	})
+	return found, foundOK
 }
 
 func (nc *NetworkControl) FindClientByDeviceID(groupName string, deviceID string) (ClientInfo, bool) {

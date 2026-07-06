@@ -104,7 +104,6 @@ func (c *Controller) BuildDNSSnapshot(domain, group string) (*DNSSnapshotView, e
 		},
 	}
 
-	c.nc.VirtualNetwork.mutex.RLock()
 	for _, scope := range scopes {
 		snapshot.Networks = append(snapshot.Networks, DNSNetworkView{
 			Group:     scope.shortName,
@@ -112,38 +111,39 @@ func (c *Controller) BuildDNSSnapshot(domain, group string) (*DNSSnapshotView, e
 			Netmask:   scope.netmask,
 		})
 
-		network, ok := c.nc.VirtualNetwork.data[scope.runtimeGroup]
-		if !ok || network == nil {
-			continue
-		}
-		for ip, client := range network.Clients {
-			if strings.HasPrefix(clientNetworkScope(client, scope.runtimeGroup), personalNetworkPrefix) {
-				continue
+		c.nc.forEachVirtualNetworkRead(scope.runtimeGroup, func(_ string, network *NetworkInfo) bool {
+			if network == nil {
+				return false
 			}
-			name := strings.ToLower(strings.TrimSpace(client.Name))
-			if name == "" {
-				name = strings.ToLower(strings.TrimSpace(client.DeviceId))
+			for ip, client := range network.Clients {
+				if strings.HasPrefix(clientNetworkScope(client, scope.runtimeGroup), personalNetworkPrefix) {
+					continue
+				}
+				name := strings.ToLower(strings.TrimSpace(client.Name))
+				if name == "" {
+					name = strings.ToLower(strings.TrimSpace(client.DeviceId))
+				}
+				updatedAt := client.ControlLastSeen
+				if client.DataPlaneLastSeen > updatedAt {
+					updatedAt = client.DataPlaneLastSeen
+				}
+				if client.LastJoin > updatedAt {
+					updatedAt = client.LastJoin
+				}
+				snapshot.Records = append(snapshot.Records, DNSRecordView{
+					FQDN:               buildDNSFQDN(name, scope.shortName, domain, scope.includeGroupLabel),
+					ShortName:          name,
+					DeviceID:           strings.TrimSpace(client.DeviceId),
+					Group:              scope.shortName,
+					VirtualIP:          net.IPv4(byte(ip>>24), byte(ip>>16), byte(ip>>8), byte(ip)).String(),
+					ControlOnline:      client.ControlOnline,
+					DataPlaneReachable: client.DataPlaneReachable,
+					UpdatedAtUnix:      updatedAt,
+				})
 			}
-			updatedAt := client.ControlLastSeen
-			if client.DataPlaneLastSeen > updatedAt {
-				updatedAt = client.DataPlaneLastSeen
-			}
-			if client.LastJoin > updatedAt {
-				updatedAt = client.LastJoin
-			}
-			snapshot.Records = append(snapshot.Records, DNSRecordView{
-				FQDN:               buildDNSFQDN(name, scope.shortName, domain, scope.includeGroupLabel),
-				ShortName:          name,
-				DeviceID:           strings.TrimSpace(client.DeviceId),
-				Group:              scope.shortName,
-				VirtualIP:          net.IPv4(byte(ip>>24), byte(ip>>16), byte(ip>>8), byte(ip)).String(),
-				ControlOnline:      client.ControlOnline,
-				DataPlaneReachable: client.DataPlaneReachable,
-				UpdatedAtUnix:      updatedAt,
-			})
-		}
+			return false
+		})
 	}
-	c.nc.VirtualNetwork.mutex.RUnlock()
 
 	for _, gateway := range c.ListGateways() {
 		snapshot.Gateways = append(snapshot.Gateways, DNSGatewayView{
