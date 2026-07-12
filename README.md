@@ -193,6 +193,9 @@ Examples:
 ./sdl-admin device extend-expiry -u <user_id> --device-id <device_id> --ttl-seconds 2592000
 ./sdl-admin device extend-expiry -u <user_id> --all --ttl-seconds 2592000
 
+./sdl-admin exit-node approve <device_id>
+./sdl-admin exit-node approve -u <user_id> --name <node_name>
+
 ./sdl-admin gateway --list
 ./sdl-admin gateway --enlist gw-1
 ./sdl-admin gateway --delist gw-1

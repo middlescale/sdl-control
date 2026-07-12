@@ -88,10 +88,15 @@ func executeAdminRequest(ctrl *control.Controller, version string, req adminRequ
 	case "exit_node_list":
 		return adminResponse{OK: true, ExitNodes: ctrl.ListExitNodes(strings.TrimSpace(req.UserID))}
 	case "exit_node_approve":
-		if err := ctrl.ApproveExitNode(strings.TrimSpace(req.UserID), strings.TrimSpace(req.DeviceID)); err != nil {
+		userID, deviceID, err := ctrl.ApproveExitNodeTarget(
+			strings.TrimSpace(req.UserID),
+			strings.TrimSpace(req.DeviceID),
+			strings.TrimSpace(req.Name),
+		)
+		if err != nil {
 			return adminResponse{OK: false, Error: err.Error()}
 		}
-		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForAuthedDeviceChange(strings.TrimSpace(req.UserID), strings.TrimSpace(req.DeviceID)); pushErr != nil {
+		if pushPackets, pushErr := ctrl.BuildPushDeviceListPacketsForAuthedDeviceChange(userID, deviceID); pushErr != nil {
 			log.Errorf("BuildPushDeviceListPacketsForAuthedDeviceChange error: %v", pushErr)
 		} else {
 			for _, push := range pushPackets {
@@ -103,7 +108,7 @@ func executeAdminRequest(ctrl *control.Controller, version string, req adminRequ
 				}
 			}
 		}
-		return adminResponse{OK: true, ExitNodes: ctrl.ListExitNodes(strings.TrimSpace(req.UserID))}
+		return adminResponse{OK: true, ExitNodes: ctrl.ListExitNodes(userID)}
 	case "exit_node_revoke":
 		if err := ctrl.RevokeExitNode(strings.TrimSpace(req.UserID), strings.TrimSpace(req.DeviceID)); err != nil {
 			return adminResponse{OK: false, Error: err.Error()}

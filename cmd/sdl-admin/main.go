@@ -532,7 +532,7 @@ func parseExitNode(args []string) adminRequest {
 	case "list":
 		return parseExitNodeList(args[1:])
 	case "approve":
-		return parseExitNodeApproval("exit_node_approve", args[1:])
+		return parseExitNodeApprove(args[1:])
 	case "revoke":
 		return parseExitNodeApproval("exit_node_revoke", args[1:])
 	default:
@@ -554,6 +554,36 @@ func parseExitNodeList(args []string) adminRequest {
 		fatalUsage()
 	}
 	return adminRequest{Action: "exit_node_list", UserID: strings.TrimSpace(userID)}
+}
+
+func parseExitNodeApprove(args []string) adminRequest {
+	fs := flag.NewFlagSet("exit-node approve", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	var userID string
+	var name string
+	fs.StringVar(&userID, "id", "", "optional user id")
+	fs.StringVar(&userID, "u", "", "optional user id")
+	fs.StringVar(&name, "name", "", "node name; requires user id")
+	fs.StringVar(&name, "n", "", "node name; requires user id")
+	if err := fs.Parse(args); err != nil {
+		fatalUsage()
+	}
+	userID = strings.TrimSpace(userID)
+	name = strings.TrimSpace(name)
+	if name != "" {
+		if userID == "" || fs.NArg() != 0 {
+			fatalUsage()
+		}
+		return adminRequest{Action: "exit_node_approve", UserID: userID, Name: name}
+	}
+	if fs.NArg() != 1 {
+		fatalUsage()
+	}
+	return adminRequest{
+		Action:   "exit_node_approve",
+		UserID:   userID,
+		DeviceID: strings.TrimSpace(fs.Arg(0)),
+	}
 }
 
 func parseExitNodeApproval(action string, args []string) adminRequest {
@@ -747,7 +777,8 @@ func fatalUsage() {
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --enlist gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] gateway --delist gw-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] exit-node list [--id/-u u-1]")
-	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] exit-node approve --id/-u u-1 --device-id/-d dev-1")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] exit-node approve [--id/-u u-1] <device-id>")
+	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] exit-node approve --id/-u u-1 --name/-n node-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] exit-node revoke --id/-u u-1 --device-id/-d dev-1")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsDomains")
 	fmt.Fprintln(os.Stderr, "  sdl-admin [--socket /tmp/sdl-control-admin.sock] [--json] dnsSnapshot --domain/-d ms.net [--group/-g default]")

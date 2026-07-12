@@ -3050,6 +3050,48 @@ func TestExitNodeStatusMarksAdminViewAndDeviceListUsable(t *testing.T) {
 	}
 }
 
+func TestResolveExitNodeApprovalTarget(t *testing.T) {
+	ctrl := newControllerWithConfig(t, &config.Config{
+		DefaultDomain: "ms.net",
+		Domains: map[string]config.DomainConfig{
+			"ms.net": {Groups: map[string]config.GroupConfig{
+				"default": {Gateway: net.ParseIP("10.26.0.1"), Netmask: "255.255.255.0"},
+			}},
+		},
+		GatewayTicketSecret: testGatewayTicketSecret,
+	})
+	defer ctrl.Stop()
+
+	user, err := ctrl.UMCreateUserWithID("exit-user", "default.ms.net")
+	if err != nil {
+		t.Fatalf("UMCreateUserWithID failed: %v", err)
+	}
+	for _, deviceID := range []string{"dev-jp", "dev-hk"} {
+		ticket, err := ctrl.UMIssueDeviceTicket(user.UserID, "default.ms.net", time.Minute)
+		if err != nil {
+			t.Fatalf("UMIssueDeviceTicket failed: %v", err)
+		}
+		if _, err := ctrl.UMAuthDevice(user.UserID, "default.ms.net", deviceID, ticket.Ticket, []byte("pk-"+deviceID)); err != nil {
+			t.Fatalf("UMAuthDevice(%s) failed: %v", deviceID, err)
+		}
+	}
+	if err := ctrl.UMSetAuthedDeviceDisplayName("default.ms.net", "dev-jp", "aliyun-jp"); err != nil {
+		t.Fatalf("UMSetAuthedDeviceDisplayName failed: %v", err)
+	}
+
+	resolvedUser, resolvedDevice, err := ctrl.resolveExitNodeApprovalTarget("", "dev-hk", "")
+	if err != nil || resolvedUser != user.UserID || resolvedDevice != "dev-hk" {
+		t.Fatalf("unexpected device-id resolution: user=%q device=%q err=%v", resolvedUser, resolvedDevice, err)
+	}
+	resolvedUser, resolvedDevice, err = ctrl.resolveExitNodeApprovalTarget(user.UserID, "", "aliyun-jp")
+	if err != nil || resolvedUser != user.UserID || resolvedDevice != "dev-jp" {
+		t.Fatalf("unexpected name resolution: user=%q device=%q err=%v", resolvedUser, resolvedDevice, err)
+	}
+	if _, _, err := ctrl.resolveExitNodeApprovalTarget("", "", "aliyun-jp"); err == nil || !strings.Contains(err.Error(), "user_id is required") {
+		t.Fatalf("expected name-without-user error, got %v", err)
+	}
+}
+
 func TestExitNodeListIncludesUnapprovedAdvertisedCandidates(t *testing.T) {
 	ctrl := newControllerWithConfig(t, &config.Config{
 		DefaultDomain: "ms.net",

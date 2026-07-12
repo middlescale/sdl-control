@@ -97,9 +97,13 @@ func TestParseExitNodeCommands(t *testing.T) {
 	if listReq.Action != "exit_node_list" || listReq.UserID != "sdl-user-1" {
 		t.Fatalf("unexpected exit-node list request: %+v", listReq)
 	}
-	approveReq := parseExitNode([]string{"approve", "--id", "sdl-user-1", "--device-id", "dev-1"})
-	if approveReq.Action != "exit_node_approve" || approveReq.UserID != "sdl-user-1" || approveReq.DeviceID != "dev-1" {
+	approveReq := parseExitNode([]string{"approve", "dev-1"})
+	if approveReq.Action != "exit_node_approve" || approveReq.UserID != "" || approveReq.DeviceID != "dev-1" {
 		t.Fatalf("unexpected exit-node approve request: %+v", approveReq)
+	}
+	approveByNameReq := parseExitNode([]string{"approve", "-u", "sdl-user-1", "--name", "jp-1"})
+	if approveByNameReq.Action != "exit_node_approve" || approveByNameReq.UserID != "sdl-user-1" || approveByNameReq.Name != "jp-1" {
+		t.Fatalf("unexpected exit-node approve-by-name request: %+v", approveByNameReq)
 	}
 	revokeReq := parseExitNode([]string{"revoke", "-u", "sdl-user-1", "-d", "dev-1"})
 	if revokeReq.Action != "exit_node_revoke" || revokeReq.UserID != "sdl-user-1" || revokeReq.DeviceID != "dev-1" {

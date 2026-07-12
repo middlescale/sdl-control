@@ -2518,6 +2518,63 @@ func (c *Controller) ApproveExitNode(userID, deviceID string) error {
 	return nil
 }
 
+// ApproveExitNodeTarget resolves an authenticated device by its stable ID, or by
+// its display name within an explicitly supplied user, then records its approval.
+func (c *Controller) ApproveExitNodeTarget(userID, deviceID, displayName string) (string, string, error) {
+	userID, deviceID, err := c.resolveExitNodeApprovalTarget(userID, deviceID, displayName)
+	if err != nil {
+		return "", "", err
+	}
+	if err := c.ApproveExitNode(userID, deviceID); err != nil {
+		return "", "", err
+	}
+	return userID, deviceID, nil
+}
+
+func (c *Controller) resolveExitNodeApprovalTarget(userID, deviceID, displayName string) (string, string, error) {
+	userID = strings.TrimSpace(userID)
+	deviceID = strings.TrimSpace(deviceID)
+	displayName = strings.TrimSpace(displayName)
+	if deviceID != "" && displayName != "" {
+		return "", "", fmt.Errorf("specify either device_id or name, not both")
+	}
+	if deviceID == "" && displayName == "" {
+		return "", "", fmt.Errorf("device_id or name is required")
+	}
+	if displayName != "" && userID == "" {
+		return "", "", fmt.Errorf("user_id is required when approving by name")
+	}
+
+	records := c.um.ListAuthedDevices()
+	if userID != "" {
+		records = c.um.ListAuthedDevicesByUser(userID)
+	}
+	matches := make([]UMAuthDevice, 0, 1)
+	for _, record := range records {
+		if (deviceID != "" && record.DeviceID == deviceID) ||
+			(displayName != "" && record.DisplayName == displayName) {
+			matches = append(matches, record)
+		}
+	}
+	if len(matches) == 0 {
+		if userID != "" {
+			if displayName != "" {
+				return "", "", fmt.Errorf("node %q is not authed for user %s", displayName, userID)
+			}
+			return "", "", fmt.Errorf("device %s is not authed for user %s", deviceID, userID)
+		}
+		return "", "", fmt.Errorf("device %s is not an authed device", deviceID)
+	}
+	if len(matches) > 1 {
+		if userID == "" {
+			return "", "", fmt.Errorf("device %s is ambiguous; specify --id/-u <user-id>", deviceID)
+		}
+		return "", "", fmt.Errorf("node %q is ambiguous for user %s; use its device_id", displayName, userID)
+	}
+	match := matches[0]
+	return match.UserID, match.DeviceID, nil
+}
+
 func (c *Controller) RevokeExitNode(userID, deviceID string) error {
 	userID = strings.TrimSpace(userID)
 	deviceID = strings.TrimSpace(deviceID)
