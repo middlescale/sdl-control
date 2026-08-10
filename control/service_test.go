@@ -732,6 +732,194 @@ func TestBuildPunchStartPacketsFromStatus(t *testing.T) {
 	}
 }
 
+func TestBuildPunchStartPacketsFromStatusTargetsRecoveryPeer(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	targetReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	otherReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-c", "node-c"), &net.UDPAddr{IP: net.ParseIP("1.1.1.3"), Port: 3333})
+
+	statuses := []struct {
+		registration *pb.RegistrationResponse
+		status       *pb.ClientStatusInfo
+	}{
+		{
+			registration: srcReg,
+			status: &pb.ClientStatusInfo{
+				Source:              srcReg.GetVirtualIp(),
+				NatType:             pb.PunchNatType_Cone,
+				PunchTriggerReason:  pb.PunchTriggerReason_PunchTriggerManualRequest,
+				RecoveryPunchTarget: targetReg.GetVirtualIp(),
+				PublicUdpEndpoints:  []*pb.PunchEndpoint{{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001}},
+			},
+		},
+		{
+			registration: targetReg,
+			status: &pb.ClientStatusInfo{
+				Source:             targetReg.GetVirtualIp(),
+				NatType:            pb.PunchNatType_Cone,
+				PublicUdpEndpoints: []*pb.PunchEndpoint{{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002}},
+			},
+		},
+		{
+			registration: otherReg,
+			status: &pb.ClientStatusInfo{
+				Source:             otherReg.GetVirtualIp(),
+				NatType:            pb.PunchNatType_Cone,
+				PublicUdpEndpoints: []*pb.PunchEndpoint{{Ip: util.IpToUint32(net.ParseIP("7.7.7.7")), Port: 30003}},
+			},
+		},
+	}
+	for _, entry := range statuses {
+		payload, err := proto.Marshal(entry.status)
+		if err != nil {
+			t.Fatalf("marshal client status failed: %v", err)
+		}
+		if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+			Proto:    protocol.ProtocolService,
+			AppProto: protocol.AppProtoClientStatusInfo,
+			SrcIP:    util.Uint32ToIP(entry.registration.GetVirtualIp()),
+			Payload:  payload,
+		}); err != nil {
+			t.Fatalf("update client status failed: %v", err)
+		}
+	}
+
+	packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(packets) != 2 {
+		t.Fatalf("expected exactly the source/target punch pair, got %d packets", len(packets))
+	}
+	for _, packet := range packets {
+		if packet.DstIP.Equal(util.Uint32ToIP(otherReg.GetVirtualIp())) {
+			t.Fatalf("recovery punch incorrectly selected unrelated peer %s", packet.DstIP)
+		}
+		if !packet.DstIP.Equal(util.Uint32ToIP(srcReg.GetVirtualIp())) && !packet.DstIP.Equal(util.Uint32ToIP(targetReg.GetVirtualIp())) {
+			t.Fatalf("unexpected recovery punch destination %s", packet.DstIP)
+		}
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusManualRecoveryWithoutTargetFansOut(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	srcReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	firstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+	secondReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-c", "node-c"), &net.UDPAddr{IP: net.ParseIP("1.1.1.3"), Port: 3333})
+
+	statuses := []struct {
+		registration *pb.RegistrationResponse
+		status       *pb.ClientStatusInfo
+	}{
+		{
+			registration: srcReg,
+			status: &pb.ClientStatusInfo{
+				Source:             srcReg.GetVirtualIp(),
+				NatType:            pb.PunchNatType_Cone,
+				PunchTriggerReason: pb.PunchTriggerReason_PunchTriggerManualRequest,
+				PublicUdpEndpoints: []*pb.PunchEndpoint{{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001}},
+			},
+		},
+		{
+			registration: firstReg,
+			status: &pb.ClientStatusInfo{
+				Source:             firstReg.GetVirtualIp(),
+				NatType:            pb.PunchNatType_Cone,
+				PublicUdpEndpoints: []*pb.PunchEndpoint{{Ip: util.IpToUint32(net.ParseIP("9.9.9.9")), Port: 30002}},
+			},
+		},
+		{
+			registration: secondReg,
+			status: &pb.ClientStatusInfo{
+				Source:             secondReg.GetVirtualIp(),
+				NatType:            pb.PunchNatType_Cone,
+				PublicUdpEndpoints: []*pb.PunchEndpoint{{Ip: util.IpToUint32(net.ParseIP("7.7.7.7")), Port: 30003}},
+			},
+		},
+	}
+	for _, entry := range statuses {
+		payload, err := proto.Marshal(entry.status)
+		if err != nil {
+			t.Fatalf("marshal client status failed: %v", err)
+		}
+		if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+			Proto:    protocol.ProtocolService,
+			AppProto: protocol.AppProtoClientStatusInfo,
+			SrcIP:    util.Uint32ToIP(entry.registration.GetVirtualIp()),
+			Payload:  payload,
+		}); err != nil {
+			t.Fatalf("update client status failed: %v", err)
+		}
+	}
+
+	packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+		Proto: protocol.ProtocolService,
+		SrcIP: util.Uint32ToIP(srcReg.GetVirtualIp()),
+		DstIP: util.Uint32ToIP(srcReg.GetVirtualGateway()),
+	})
+	if err != nil {
+		t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+	}
+	if len(packets) != 4 {
+		t.Fatalf("manual recovery without a target must fan out to both peers, got %d packets", len(packets))
+	}
+}
+
+func TestBuildPunchStartPacketsFromStatusDeduplicatesBidirectionalManualRecovery(t *testing.T) {
+	ctrl := newTestController(t)
+	defer ctrl.Stop()
+	firstReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-a", "node-a"), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 1111})
+	secondReg := mustRegister(t, ctrl, newBaseRegisterReq("dev-b", "node-b"), &net.UDPAddr{IP: net.ParseIP("1.1.1.2"), Port: 2222})
+
+	reportStatus := func(reg *pb.RegistrationResponse, target uint32) {
+		payload, err := proto.Marshal(&pb.ClientStatusInfo{
+			Source:              reg.GetVirtualIp(),
+			NatType:             pb.PunchNatType_Cone,
+			PunchTriggerReason:  pb.PunchTriggerReason_PunchTriggerManualRequest,
+			RecoveryPunchTarget: target,
+			PublicUdpEndpoints:  []*pb.PunchEndpoint{{Ip: util.IpToUint32(net.ParseIP("8.8.8.8")), Port: 30001}},
+		})
+		if err != nil {
+			t.Fatalf("marshal client status failed: %v", err)
+		}
+		if _, err := ctrl.HandleClientStatusInfoPacket(&protocol.Packet{
+			Proto:    protocol.ProtocolService,
+			AppProto: protocol.AppProtoClientStatusInfo,
+			SrcIP:    util.Uint32ToIP(reg.GetVirtualIp()),
+			Payload:  payload,
+		}); err != nil {
+			t.Fatalf("update client status failed: %v", err)
+		}
+	}
+	build := func(reg *pb.RegistrationResponse) []*protocol.Packet {
+		packets, err := ctrl.BuildPunchStartPacketsFromStatus(&protocol.Packet{
+			Proto: protocol.ProtocolService,
+			SrcIP: util.Uint32ToIP(reg.GetVirtualIp()),
+			DstIP: util.Uint32ToIP(reg.GetVirtualGateway()),
+		})
+		if err != nil {
+			t.Fatalf("BuildPunchStartPacketsFromStatus failed: %v", err)
+		}
+		return packets
+	}
+
+	reportStatus(firstReg, secondReg.GetVirtualIp())
+	reportStatus(secondReg, 0)
+	if packets := build(firstReg); len(packets) != 2 {
+		t.Fatalf("expected initial manual recovery to dispatch one pair, got %d packets", len(packets))
+	}
+	reportStatus(secondReg, firstReg.GetVirtualIp())
+	if packets := build(secondReg); len(packets) != 0 {
+		t.Fatalf("expected opposite-direction manual recovery to be deduplicated, got %d packets", len(packets))
+	}
+}
+
 func TestBuildPunchStartPacketsFromStatusSkipsExistingMutualP2P(t *testing.T) {
 	ctrl := newTestController(t)
 	defer ctrl.Stop()

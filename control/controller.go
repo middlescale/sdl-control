@@ -139,6 +139,7 @@ type ExitNodeAdminView struct {
 }
 
 const maxPunchAttemptsPerPair = 3
+const manualPunchPairDedupWindow = 3 * time.Second
 const gatewayNodeLease = 90 * time.Second
 const deviceAuthChallengeTTL = 60 * time.Second
 const gatewayReportFreshnessWindow = 2 * time.Minute
@@ -227,12 +228,13 @@ func NewController(cfg *config.Config, db *sql.DB) (*Controller, error) {
 	return &Controller{
 		pgStore: pgStore,
 		nc: NetworkControl{
-			VirtualNetwork:    *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
-			IPSessions:        *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
-			CipherSessions:    *NewExpireMap[string, struct{}](24 * time.Hour),
-			PunchSessions:     *NewExpireMap[string, *PunchSession](10 * time.Minute),
-			PunchPairCooldown: *NewExpireMap[string, struct{}](20 * time.Second),
-			PunchPairRetry:    *NewExpireMap[string, PunchRetryState](30 * time.Minute),
+			VirtualNetwork:       *NewExpireMap[string, *NetworkInfo](7 * 24 * time.Hour),
+			IPSessions:           *NewExpireMap[IpSessionKey, net.Addr](24 * time.Hour),
+			CipherSessions:       *NewExpireMap[string, struct{}](24 * time.Hour),
+			PunchSessions:        *NewExpireMap[string, *PunchSession](10 * time.Minute),
+			PunchPairCooldown:    *NewExpireMap[string, struct{}](20 * time.Second),
+			ManualPunchPairDedup: *NewExpireMap[string, struct{}](manualPunchPairDedupWindow),
+			PunchPairRetry:       *NewExpireMap[string, PunchRetryState](30 * time.Minute),
 		},
 		um:                       um,
 		gs:                       gatewayStore,
@@ -424,6 +426,7 @@ func (c *Controller) Stop() {
 	c.nc.CipherSessions.Stop()
 	c.nc.PunchSessions.Stop()
 	c.nc.PunchPairCooldown.Stop()
+	c.nc.ManualPunchPairDedup.Stop()
 	c.nc.PunchPairRetry.Stop()
 }
 
@@ -1240,16 +1243,17 @@ func (c *Controller) HandleClientStatusInfoPacketInNetwork(request *protocol.Pac
 	}
 	now := time.Now().Unix()
 	clientStatus := &ClientStatusInfo{
-		P2PList:            make([]net.IP, 0, len(status.GetP2PList())),
-		PublicUDPEndpoints: make([]*net.UDPAddr, 0, len(status.GetPublicUdpEndpoints())),
-		LocalUDPEndpoints:  make([]*net.UDPAddr, 0, len(status.GetLocalUdpEndpoints())),
-		UpStream:           status.GetUpStream(),
-		DownStream:         status.GetDownStream(),
-		IsCone:             status.GetNatType() == pb.PunchNatType_Cone,
-		PunchTriggerReason: status.GetPunchTriggerReason().String(),
-		UpdateTime:         now,
-		ExitNodeAdvertised: status.GetExitNodeAdvertised(),
-		ExitNodeLocalReady: status.GetExitNodeLocalReady(),
+		P2PList:             make([]net.IP, 0, len(status.GetP2PList())),
+		PublicUDPEndpoints:  make([]*net.UDPAddr, 0, len(status.GetPublicUdpEndpoints())),
+		LocalUDPEndpoints:   make([]*net.UDPAddr, 0, len(status.GetLocalUdpEndpoints())),
+		UpStream:            status.GetUpStream(),
+		DownStream:          status.GetDownStream(),
+		IsCone:              status.GetNatType() == pb.PunchNatType_Cone,
+		PunchTriggerReason:  status.GetPunchTriggerReason().String(),
+		RecoveryPunchTarget: status.GetRecoveryPunchTarget(),
+		UpdateTime:          now,
+		ExitNodeAdvertised:  status.GetExitNodeAdvertised(),
+		ExitNodeLocalReady:  status.GetExitNodeLocalReady(),
 	}
 	for _, item := range status.GetP2PList() {
 		clientStatus.P2PList = append(clientStatus.P2PList, util.Uint32ToIP(item.GetNextIp()))
@@ -1336,15 +1340,20 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 		if !ok || !srcClient.ControlOnline || srcClient.ClientStatus == nil {
 			return true
 		}
+		triggerReason := pb.PunchTriggerReason_PunchTriggerStatusUpdate
+		if parsed, ok := pb.PunchTriggerReason_value[srcClient.ClientStatus.PunchTriggerReason]; ok {
+			triggerReason = pb.PunchTriggerReason(parsed)
+		}
+		recoveryPunchTarget := uint32(0)
+		if triggerReason == pb.PunchTriggerReason_PunchTriggerManualRequest {
+			recoveryPunchTarget = srcClient.ClientStatus.RecoveryPunchTarget
+		}
 		for targetIP, targetClient := range network.Clients {
 			if targetIP == srcIP || !targetClient.ControlOnline || targetClient.ClientStatus == nil {
 				continue
 			}
-			triggerReason := pb.PunchTriggerReason_PunchTriggerStatusUpdate
-			if srcClient.ClientStatus != nil {
-				if parsed, ok := pb.PunchTriggerReason_value[srcClient.ClientStatus.PunchTriggerReason]; ok {
-					triggerReason = pb.PunchTriggerReason(parsed)
-				}
+			if recoveryPunchTarget != 0 && targetIP != recoveryPunchTarget {
+				continue
 			}
 			if triggerReason == pb.PunchTriggerReason_StatusReportOnly {
 				continue
@@ -1379,6 +1388,14 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 			targetEndpoints := buildPunchEndpoints(targetClient)
 			if len(sourceEndpoints) == 0 || len(targetEndpoints) == 0 {
 				continue
+			}
+			if manualTrigger {
+				// Both endpoints can observe payload at the same time. Claim this
+				// unordered pair atomically so their two recovery reports produce
+				// one PunchStart session, while still allowing a quick retry.
+				if !c.nc.ManualPunchPairDedup.TrySetIfAbsent(pairKey, struct{}{}) {
+					continue
+				}
 			}
 			sessionID := uint64(time.Now().UnixNano())
 			attempt := uint32(1)
@@ -1438,8 +1455,8 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 				buildErr = fmt.Errorf("PunchStart target marshal error: %v", err)
 				return false
 			}
-			packets = []*protocol.Packet{
-				{
+			packets = append(packets,
+				&protocol.Packet{
 					Ver:             protocol.V3,
 					Proto:           protocol.ProtocolService,
 					AppProto:        protocol.AppProtoPunchStart,
@@ -1450,7 +1467,7 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 					Payload:         sourcePayload,
 					RouteNetworkKey: key,
 				},
-				{
+				&protocol.Packet{
 					Ver:             protocol.V3,
 					Proto:           protocol.ProtocolService,
 					AppProto:        protocol.AppProtoPunchStart,
@@ -1461,8 +1478,12 @@ func (c *Controller) BuildPunchStartPacketsFromStatusInNetwork(request *protocol
 					Payload:         targetPayload,
 					RouteNetworkKey: key,
 				},
+			)
+			// A targeted recovery has found its one intended peer. Legacy manual
+			// reports omit the target, so retain their fan-out behavior instead.
+			if recoveryPunchTarget != 0 || !manualTrigger {
+				return false
 			}
-			return false
 		}
 		return true
 	})
@@ -2054,6 +2075,8 @@ type NetworkControl struct {
 	PunchSessions ExpireMap[string, *PunchSession]
 	// 打洞触发冷却（pair key）
 	PunchPairCooldown ExpireMap[string, struct{}]
+	// Manual recovery de-duplication for simultaneous bidirectional payload.
+	ManualPunchPairDedup ExpireMap[string, struct{}]
 	// 打洞重试状态（pair key）
 	PunchPairRetry ExpireMap[string, PunchRetryState]
 }
@@ -3932,6 +3955,27 @@ func (e *ExpireMap[K, T]) Set(key K, value T) {
 		e.expiration[key] = deadline
 	}
 	e.mutex.Unlock()
+}
+
+// TrySetIfAbsent atomically stores value when key is absent or expired.
+func (e *ExpireMap[K, T]) TrySetIfAbsent(key K, value T) bool {
+	now := time.Now().UnixNano()
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	if deadline, ok := e.expiration[key]; ok && deadline > 0 && now > deadline {
+		delete(e.data, key)
+		delete(e.expiration, key)
+	}
+	if _, ok := e.data[key]; ok {
+		return false
+	}
+	e.data[key] = value
+	if e.ttl > 0 {
+		e.expiration[key] = now + e.ttl
+	} else {
+		delete(e.expiration, key)
+	}
+	return true
 }
 
 // Get returns the value and true if present and not expired.

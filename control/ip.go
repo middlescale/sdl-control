@@ -155,14 +155,15 @@ type ClientInfo struct {
 }
 
 type ClientStatusInfo struct {
-	P2PList            []net.IP
-	PublicUDPEndpoints []*net.UDPAddr
-	LocalUDPEndpoints  []*net.UDPAddr
-	UpStream           uint64
-	DownStream         uint64
-	IsCone             bool
-	PunchTriggerReason string
-	UpdateTime         int64 // Unix时间戳 (timestamp)
-	ExitNodeAdvertised bool
-	ExitNodeLocalReady bool
+	P2PList             []net.IP
+	PublicUDPEndpoints  []*net.UDPAddr
+	LocalUDPEndpoints   []*net.UDPAddr
+	UpStream            uint64
+	DownStream          uint64
+	IsCone              bool
+	PunchTriggerReason  string
+	RecoveryPunchTarget uint32
+	UpdateTime          int64 // Unix时间戳 (timestamp)
+	ExitNodeAdvertised  bool
+	ExitNodeLocalReady  bool
 }
